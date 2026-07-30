@@ -12,12 +12,25 @@ Output:
 
 import pandas as pd
 from rapidfuzz import fuzz
+from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent
 
-OCR_FILE = "index.xlsx"
-REGISTER_FILE = "Skeppare B - fartygsbefäl klass VIII 1980-2000.xlsx"
+DATA_DIR = PROJECT_ROOT / "data"
 
-OUTPUT_FILE = "validation_output.xlsx"
+OCR_FILE = DATA_DIR / "output" / "index.xlsx"
+
+REGISTER_FILE = (
+    DATA_DIR
+    / "authoritative_register"
+    / "Skeppare B - fartygsbefäl klass VIII 1980-2000.xlsx"
+)
+
+OUTPUT_FILE = (
+    DATA_DIR
+    / "output"
+    / "validation_output.xlsx"
+)
 
 
 # --------------------------------------------------
