@@ -162,6 +162,17 @@ OCR_DIGIT_REPLACEMENTS = {
     "B": "8",
 }
 
+BLACKLIST_NAMES = [
+
+    "STAFFAN WILSKE",
+    "KURT JONASSON",
+    "STIG HOLMSTRÖM",
+    "ANDERS HASSLING",
+    "BJÖRN BORG",
+    "GÖRAN LINDHOLM",
+    "LENNART JOHNSSON",
+
+]
 
 def normalize_ocr_digit_text(text):
     """
@@ -291,7 +302,7 @@ def extract_personnummer_candidates(text):
 
         upper = line.upper()
 
-        if re.search(
+        if not re.search(
                 r"P[AE]R?SON",
                 upper
         ):
@@ -404,11 +415,6 @@ def extract_bevisnummer_candidates(text):
 # -------------
 
 def extract_name_candidates(text):
-    """
-    Försöker hitta namn på bevissidor.
-
-    Returnerar lista med kandidater.
-    """
 
     if not text:
         return []
@@ -417,38 +423,73 @@ def extract_name_candidates(text):
 
     lines = text.splitlines()
 
+    markers = [
+        "PERSONNR",
+        "PERSONNUMMER",
+        "PARSONNR",
+        "PARSONNUMMER"
+    ]
+
     for i, line in enumerate(lines):
 
         upper = line.upper()
 
-        if (
-            "PERSONNR" in upper
-            or "PERSONNUMMER" in upper
-            or "PARSONNR" in upper
-        ):
+        if not any(m in upper for m in markers):
+            continue
 
-            # ofta ligger namnet på samma rad
-            # eller raden ovanför
+        # mycket större sökfönster
+        window = lines[max(0, i - 5): min(len(lines), i + 5)]
 
-            window = lines[max(0, i - 1): i + 2]
+        for candidate in window:
 
-            for candidate in window:
+            candidate = candidate.strip()
 
-                candidate = candidate.strip()
+            if len(candidate) < 5:
+                continue
 
-                if len(candidate) < 5:
+            # ta bort personnummer om de ligger på raden
+            candidate = re.sub(
+                r"\d{6}[- ]?\d{4}",
+                "",
+                candidate
+            )
+
+            candidate = candidate.strip()
+
+            words = candidate.split()
+
+            if len(words) < 2:
+                if is_blacklisted_name(candidate): 4
+                continue
+
+            # alla ord måste vara bokstavsliknande
+            if all(
+                re.fullmatch(
+                    r"[A-Za-zÅÄÖåäö\-]+",
+                    w
+                )
+                for w in words
+            ):
+
+                bad_words = [
+
+                    "ADJUNKT",
+                    "LEKTOR",
+                    "TIMLÄRARE",
+                    "SJÖKAPTEN",
+                    "EXAMENSFÖRRÄTTARE",
+                    "LÄRARE"
+
+                ]
+
+                if any(
+                        word in candidate.upper()
+                        for word in bad_words
+                ):
                     continue
+                candidates.append(candidate)
 
-                if re.search(r"\d", candidate):
-                    continue
-
-                words = candidate.split()
-
-                if len(words) >= 2:
-
-                    candidates.append(candidate)
-
-    return candidates
+    return list(dict.fromkeys(candidates))
 
 
 # --------------------------------------------------
@@ -596,6 +637,14 @@ def safe_filename_part(value):
 
     return value.strip("_")
 
+def is_blacklisted_name(candidate):
+
+    candidate_upper = candidate.upper()
+
+    return any(
+        blocked in candidate_upper
+        for blocked in BLACKLIST_NAMES
+    )
 
 # --------------------------------------------------
 # PROCESS ONE PDF

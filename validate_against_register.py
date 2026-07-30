@@ -85,6 +85,9 @@ register_df = pd.read_excel(REGISTER_FILE)
 
 print("\nREGISTER COLUMNS:")
 print(register_df.columns.tolist())
+print("OCR COLUMNS:")
+print(ocr_df.columns.tolist())
+print()
 print()
 
 # --------------------------------------------------
@@ -92,9 +95,8 @@ print()
 # OM KOLUMNNAMNEN ÄR ANNORLUNDA
 # --------------------------------------------------
 
-REGISTER_BEVISNR_COLUMN = "bevisnummer"
-REGISTER_NAME_COLUMN = "namn"
-REGISTER_PNR_COLUMN = "personnummer"
+REGISTER_BEVISNR_COLUMN = "Intygsnummer"
+REGISTER_PNR_COLUMN = "Personnummer"
 
 OCR_BEVISNR_COLUMN = "bevisnummer"
 OCR_NAME_COLUMN = "ocr_name"
@@ -173,7 +175,7 @@ for _, row in ocr_df.iterrows():
     reg = register_lookup[bevisnr]
 
     reg_name = clean_text(
-        reg[REGISTER_NAME_COLUMN]
+        f"{reg['Efternamn']} {reg['Förnamn']}"
     )
 
     reg_pnr = clean_personnummer(
