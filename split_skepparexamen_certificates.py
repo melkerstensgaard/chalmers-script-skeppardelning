@@ -2044,21 +2044,11 @@ def process_pdf(args):
 
                 ocr_bevisnummer,
                 bevisnummer,
-                match_method,
 
-                ocr_name,
                 register_name,
-                name_match_score,
 
                 pnr,
                 register_personnummer,
-
-                ";".join(unique_bevisnummer),
-                ";".join(unique_pnrs),
-                ";".join(all_names),
-
-                start + 1,
-                end,
             ]
         )
 
@@ -2398,21 +2388,11 @@ def process_all(
 
             "ocr_bevisnummer",
             "resolved_bevisnummer",
-            "match_method",
 
-            "ocr_name",
             "register_name",
-            "name_match_score",
 
             "ocr_personnummer",
             "register_personnummer",
-
-            "all_bevisnummer_candidates",
-            "all_personnummer_candidates",
-            "all_name_candidates",
-
-            "start_page",
-            "end_page_exclusive",
         ]
     )
 
