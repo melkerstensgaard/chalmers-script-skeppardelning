@@ -203,6 +203,27 @@ BAD_NAME_WORDS = [
     "HOGSKOLA",
     "NAUTISKA",
     "INSTITUTIONEN",
+    "EFTERNAMN",
+    "EFTERNAM",
+    "EFTERMNAMN",
+    "EFTER RAMN",
+    "EFTERAMN",
+    "EFTERHMAN",
+    "EFTERNAMN TILLTALSNAMN",
+    "EFTERNAMN TILLTALSNHAMN",
+    "TILLTALSNAMN",
+    "TILLTALSNHAMN",
+    "TILLTALSNARNN",
+    "TILLTALSNAM",
+    "NAMN",
+    "NAMNET",
+
+    "SJÖBEFÖÄLSSKOLAN",
+    "SJÖBEFÄLSSKOLTAN",
+    "SJÖBEFÄLSSKOLTAN I",
+    "SIJÖBEFÄLSSKOLAN",
+    "SIJÖBEFALSSKOLAN",
+    "SJÖBEFÄLSSKOLTAN",
 
     # Certificate headings
     "SKEPPAREXAMEN",
@@ -280,6 +301,9 @@ def is_bad_name_candidate(candidate):
     ):
         return True
 
+    if looks_like_bad_name_word(upper):
+        return True
+
     words = normalized.split()
 
     # Need at least surname + first name
@@ -316,6 +340,39 @@ def is_bad_name_candidate(candidate):
 
     if any(token in words for token in noise_tokens):
         return True
+
+    return False
+
+def looks_like_bad_name_word(candidate):
+    """
+    Fuzzy check for OCR-distorted form labels and institution text.
+    """
+
+    if not candidate:
+        return False
+
+    normalized_candidate = normalize_name_for_matching(candidate)
+
+    if not normalized_candidate:
+        return False
+
+    for bad_word in BAD_NAME_WORDS:
+
+        normalized_bad = normalize_name_for_matching(bad_word)
+
+        if not normalized_bad:
+            continue
+
+        if normalized_bad in normalized_candidate:
+            return True
+
+        score = fuzz.partial_ratio(
+            normalized_bad,
+            normalized_candidate
+        )
+
+        if score >= 88:
+            return True
 
     return False
 
@@ -664,9 +721,14 @@ def find_personnummer_snippets(text, window_lines=3):
 
 def extract_personnummer_candidates(text):
     """
-    Letar ENDAST i rader som innehåller PERSONNUMMER.
+    Extracts personnummer candidates from lines near PERSONNUMMER/PERSONNR labels.
 
-    Returnerar kandidater i prioriterad ordning.
+    Supports:
+    - 650224-4897
+    - 650224 4897
+    - 6502244897
+    - 65-02-24-4897
+    - 65 02 24 4897
     """
 
     if not text:
@@ -674,62 +736,56 @@ def extract_personnummer_candidates(text):
 
     candidates = []
 
-    lines = text.splitlines()
+    snippets = find_personnummer_snippets(
+        text,
+        window_lines=4
+    )
 
-    for line in lines:
+    # Fallback if no snippets were found
+    if not snippets:
+        snippets = text.splitlines()
 
-        upper = line.upper()
+    for snippet in snippets:
 
-        if not re.search(
-                r"P[AE]R?SON",
-                upper
+        normalized = normalize_ocr_digit_text(snippet)
+
+        # Direct pattern with optional separators
+        for match in re.finditer(
+                r"\b(\d{2})[- ]?(\d{2})[- ]?(\d{2})[- ]?(\d{4})\b",
+                normalized
         ):
-            continue
 
-        normalized = normalize_ocr_digit_text(line)
-
-        # försök hitta klassiskt format
-        direct_match = re.search(
-            r"(\d{6})[- ]?(\d{4})",
-            normalized
-        )
-
-        if direct_match:
-
-            candidates.append(
-                f"{direct_match.group(1)}-{direct_match.group(2)}"
+            date_digits = (
+                match.group(1)
+                + match.group(2)
+                + match.group(3)
             )
 
-            continue
+            suffix = match.group(4)
 
-        # fallback:
-        # plocka endast siffror från raden
+            if valid_date_yymmdd(date_digits):
+                candidates.append(
+                    f"{date_digits}-{suffix}"
+                )
+
         digits = re.sub(
             r"[^0-9]",
             "",
             normalized
         )
 
-        if len(digits) == 10:
+        for pnr_candidate in extract_10_digit_windows(digits):
+            candidates.append(pnr_candidate)
 
-            candidates.append(
-                f"{digits[:6]}-{digits[6:]}"
-            )
+        # Common OCR case: extra leading zero
+        if len(digits) == 11 and digits.startswith("0"):
 
-        elif len(digits) == 11:
+            d = digits[1:]
 
-            # vanligt OCR-fel:
-            # extra nolla först
+            for pnr_candidate in extract_10_digit_windows(d):
+                candidates.append(pnr_candidate)
 
-            if digits.startswith("0"):
-
-                d = digits[1:]
-
-                candidates.append(
-                    f"{d[:6]}-{d[6:]}"
-                )
-
-    return candidates
+    return list(dict.fromkeys(candidates))
 # --------------------------------------------------
 # BEVISNUMMER
 # --------------------------------------------------
@@ -824,6 +880,43 @@ def get_volume_number_range(volume_hint):
 
     return low, high
 
+def filter_register_records_by_volume(
+        register_name_records,
+        volume_hint
+):
+    """
+    Restricts register name fallback to the numeric bevisnummer range
+    encoded in the volume folder name.
+
+    Example:
+    F2AB1 17818-18095 -> only records with bevisnummer 17818-18095.
+    """
+
+    low, high = get_volume_number_range(volume_hint)
+
+    if low is None or high is None:
+        return register_name_records
+
+    filtered = []
+
+    for record in register_name_records:
+
+        bevisnummer = str(
+            record.get("bevisnummer", "")
+        ).strip()
+
+        if not bevisnummer.isdigit():
+            continue
+
+        number = int(bevisnummer)
+
+        if low <= number <= high:
+            filtered.append(record)
+
+    if filtered:
+        return filtered
+
+    return register_name_records
 
 def find_similar_register_bevisnummer(
         raw_bevisnummer,
@@ -1488,6 +1581,71 @@ def match_pnr_to_register(
 
     return None
 
+def select_best_pnr_candidate(
+        all_pnrs,
+        register_by_personnummer
+):
+    """
+    Selects the strongest personnummer candidate.
+
+    Priority:
+    1. Exact register match
+    2. OCR-variant register match
+    3. Most common OCR candidate
+    """
+
+    if not all_pnrs:
+        return ""
+
+    clean_candidates = []
+
+    for pnr in all_pnrs:
+
+        if not pnr:
+            continue
+
+        digits = re.sub(
+            r"[^0-9]",
+            "",
+            str(pnr)
+        )
+
+        if len(digits) != 10:
+            continue
+
+        formatted = f"{digits[:6]}-{digits[6:]}"
+
+        if formatted not in clean_candidates:
+            clean_candidates.append(formatted)
+
+    if not clean_candidates:
+        return ""
+
+    # 1. Exact register match first
+    for candidate in clean_candidates:
+
+        if candidate in register_by_personnummer:
+            return candidate
+
+    # 2. OCR-variant register match
+    for candidate in clean_candidates:
+
+        record = match_pnr_to_register(
+            candidate,
+            register_by_personnummer
+        )
+
+        if record:
+            return record.get(
+                "personnummer",
+                candidate
+            )
+
+    # 3. Most common OCR candidate
+    counter = Counter(clean_candidates)
+
+    return counter.most_common(1)[0][0]
+
 def process_pdf(args):
     (
         pdf_path,
@@ -1595,7 +1753,6 @@ def process_pdf(args):
                 extract_bevisnummer_candidates(text)
             )
 
-
         for p in range(start, end):
 
             try:
@@ -1612,13 +1769,15 @@ def process_pdf(args):
 
             all_names.extend(page_names)
 
-            # Ta första träffen istället för consensus
-            if not pnr and page_pnrs:
-                pnr = page_pnrs[0]
+        pnr = select_best_pnr_candidate(
+            all_pnrs,
+            register_by_personnummer
+        )
 
-                validation.append(
-                    f"Selected PNR {pnr} from page {p + 1}"
-                )
+        if pnr:
+            validation.append(
+                f"Selected best PNR {pnr} from candidates {sorted(set(all_pnrs))}"
+            )
 
         ocr_name = ""
 
@@ -1765,9 +1924,14 @@ def process_pdf(args):
 
         if not reg_record:
 
+            volume_register_name_records = filter_register_records_by_volume(
+                register_name_records,
+                volym
+            )
+
             reg_record, score = match_ocr_names_to_register(
                 filtered_names,
-                register_name_records,
+                volume_register_name_records,
                 min_score=88
             )
 
@@ -1901,51 +2065,155 @@ def process_pdf(args):
     return rows, validation
 
 
+def safe_int(value):
+
+    text = str(value).strip()
+
+    if not text.isdigit():
+        return None
+
+    return int(text)
+
+
+def sort_rows_for_sequence_fallback(all_rows):
+    """
+    Sort rows before sequence fallback.
+
+    Sort key:
+    - volym
+    - file name
+    - start_page
+    """
+
+    FILE_COL = 0
+    VOLUME_COL = 1
+    START_PAGE_COL = 13
+
+    return sorted(
+        all_rows,
+        key=lambda row: (
+            str(row[VOLUME_COL]),
+            str(row[FILE_COL]),
+            safe_int(row[START_PAGE_COL]) or 0
+        )
+    )
+
+def sort_rows_for_sequence_fallback(all_rows):
+    """
+    Sort rows before sequence fallback.
+
+    Sort key:
+    - volym
+    - file name
+    - start_page
+    """
+
+    FILE_COL = 0
+    VOLUME_COL = 1
+    START_PAGE_COL = 13
+
+    return sorted(
+        all_rows,
+        key=lambda row: (
+            str(row[VOLUME_COL]),
+            str(row[FILE_COL]),
+            safe_int(row[START_PAGE_COL]) or 0
+        )
+    )
+
+def safe_int(value):
+
+    text = str(value).strip()
+
+    if not text.isdigit():
+        return None
+
+    return int(text)
+
 def apply_sequence_fallback(all_rows):
     """
-    Conservative sequence repair.
+    Conservative sequence repair after sorting.
 
     Only fills resolved_bevisnummer when:
     - current row is UNMATCHED
-    - previous and next rows have numeric resolved_bevisnummer
-    - previous + 2 == next
-    - current row is between them
+    - previous and next rows are in the same volume
+    - previous and next resolved bevisnummer imply exactly one missing number
+    - OCR bevisnummer is empty or similar to expected number
     """
 
-    # Column positions in rows
-    FILE_COL = 0
+    VOLUME_COL = 1
     OCR_BEVIS_COL = 2
     RESOLVED_BEVIS_COL = 3
     MATCH_METHOD_COL = 4
 
-    for i in range(1, len(all_rows) - 1):
+    sorted_rows = sort_rows_for_sequence_fallback(all_rows)
 
-        row = all_rows[i]
-        prev_row = all_rows[i - 1]
-        next_row = all_rows[i + 1]
+    for i in range(1, len(sorted_rows) - 1):
+
+        row = sorted_rows[i]
+        prev_row = sorted_rows[i - 1]
+        next_row = sorted_rows[i + 1]
+
+        current_volume = row[VOLUME_COL]
+        previous_volume = prev_row[VOLUME_COL]
+        next_volume = next_row[VOLUME_COL]
+
+        same_volume = (
+            current_volume == previous_volume
+            and current_volume == next_volume
+        )
+
+        if not same_volume:
+            continue
 
         if row[MATCH_METHOD_COL] != "UNMATCHED":
             continue
 
-        prev_bnr = str(prev_row[RESOLVED_BEVIS_COL]).strip()
-        next_bnr = str(next_row[RESOLVED_BEVIS_COL]).strip()
+        prev_bnr = safe_int(
+            prev_row[RESOLVED_BEVIS_COL]
+        )
 
-        if not prev_bnr.isdigit():
+        next_bnr = safe_int(
+            next_row[RESOLVED_BEVIS_COL]
+        )
+
+        if prev_bnr is None:
             continue
 
-        if not next_bnr.isdigit():
+        if next_bnr is None:
             continue
 
-        expected = int(prev_bnr) + 1
+        expected_bnr = prev_bnr + 1
 
-        if expected + 1 != int(next_bnr):
+        if next_bnr != expected_bnr + 1:
             continue
 
-        row[RESOLVED_BEVIS_COL] = str(expected)
-        row[MATCH_METHOD_COL] = "SEQUENCE_FALLBACK"
+        ocr_bnr = str(
+            row[OCR_BEVIS_COL]
+        ).strip()
 
-    return all_rows
+        if ocr_bnr:
 
+            cleaned_ocr_bnr = re.sub(
+                r"[^0-9]",
+                "",
+                ocr_bnr
+            )
+
+            if cleaned_ocr_bnr:
+
+                distance = Levenshtein.distance(
+                    cleaned_ocr_bnr,
+                    str(expected_bnr)
+                )
+
+                if distance > 2:
+                    continue
+
+        row[RESOLVED_BEVIS_COL] = str(expected_bnr)
+        row[MATCH_METHOD_COL] = "SEQUENCE_FALLBACK_REVIEW"
+
+    return sorted_rows
 # --------------------------------------------------
 # MAIN
 # --------------------------------------------------
@@ -2117,7 +2385,7 @@ def process_all(
         exist_ok=True
     )
 
-    #all_rows = apply_sequence_fallback(all_rows) #commented out for debug
+    all_rows = apply_sequence_fallback(all_rows)
 
     # Excel
     wb = Workbook()
