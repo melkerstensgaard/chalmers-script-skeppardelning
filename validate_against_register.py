@@ -10,6 +10,7 @@ Output:
     validation_output.xlsx
 """
 
+import re
 import pandas as pd
 from rapidfuzz import fuzz
 from pathlib import Path
@@ -51,13 +52,34 @@ def clean_text(value):
 
 def clean_bevisnummer(value):
 
+    if value is None:
+        return ""
+
     if pd.isna(value):
         return ""
 
+    text = str(value).strip()
+
+    if not text:
+        return ""
+
+    if text.lower() in ["nan", "none"]:
+        return ""
+
+    # Hanterar Excel-värden som 17853.0
     try:
-        return str(int(float(value)))
+        return str(int(float(text)))
     except Exception:
-        return str(value).strip()
+        pass
+
+    # Fallback: behåll bara siffror
+    digits = re.sub(
+        r"[^0-9]",
+        "",
+        text
+    )
+
+    return digits
 
 
 def clean_personnummer(value):
@@ -78,10 +100,16 @@ def clean_personnummer(value):
 # --------------------------------------------------
 
 print("Reading OCR file...")
-ocr_df = pd.read_excel(OCR_FILE)
+ocr_df = pd.read_excel(
+    OCR_FILE,
+    dtype=str
+)
 
 print("Reading register file...")
-register_df = pd.read_excel(REGISTER_FILE)
+register_df = pd.read_excel(
+    REGISTER_FILE,
+    dtype=str
+)
 
 print("\nREGISTER COLUMNS:")
 print(register_df.columns.tolist())
@@ -96,12 +124,20 @@ print()
 # --------------------------------------------------
 
 REGISTER_BEVISNR_COLUMN = "Intygsnummer"
+REGISTER_LASTNAME_COLUMN = "Efternamn"
+REGISTER_FIRSTNAME_COLUMN = "Förnamn"
 REGISTER_PNR_COLUMN = "Personnummer"
 
-OCR_BEVISNR_COLUMN = "bevisnummer"
-OCR_NAME_COLUMN = "ocr_name"
-OCR_PNR_COLUMN = "ocr_personnummer"
+OCR_RAW_BEVISNR_COLUMN = "ocr_bevisnummer"
+OCR_RESOLVED_BEVISNR_COLUMN = "resolved_bevisnummer"
+OCR_MATCH_METHOD_COLUMN = "match_method"
 
+OCR_NAME_COLUMN = "ocr_name"
+OCR_SPLIT_REGISTER_NAME_COLUMN = "register_name"
+OCR_NAME_SCORE_COLUMN = "name_match_score"
+
+OCR_PNR_COLUMN = "ocr_personnummer"
+OCR_SPLIT_REGISTER_PNR_COLUMN = "register_personnummer"
 
 # --------------------------------------------------
 # LOOKUP PÅ BEVISNUMMER
@@ -112,14 +148,21 @@ register_lookup = {}
 for _, row in register_df.iterrows():
 
     bevisnr = clean_bevisnummer(
-        row[REGISTER_BEVISNR_COLUMN]
+        row.get(REGISTER_BEVISNR_COLUMN, "")
     )
 
-    if bevisnr:
-        register_lookup[bevisnr] = row
+    if not bevisnr:
+        continue
+
+    register_lookup[bevisnr] = row
 
 print(
     f"Loaded {len(register_lookup)} register records"
+)
+
+print(
+    "First 10 register keys:",
+    list(register_lookup.keys())[:10]
 )
 
 # --------------------------------------------------
@@ -135,93 +178,157 @@ name_mismatch = 0
 
 for _, row in ocr_df.iterrows():
 
-    bevisnr = clean_bevisnummer(
-        row[OCR_BEVISNR_COLUMN]
+    ocr_bevisnr = clean_bevisnummer(
+        row.get(OCR_RAW_BEVISNR_COLUMN, "")
     )
 
+    resolved_bevisnr = clean_bevisnummer(
+        row.get(OCR_RESOLVED_BEVISNR_COLUMN, "")
+    )
+
+    match_method = clean_text(
+        row.get(OCR_MATCH_METHOD_COLUMN, "")
+    )
+
+    bevisnr = resolved_bevisnr
+
     ocr_name = clean_text(
-        row[OCR_NAME_COLUMN]
+        row.get(OCR_NAME_COLUMN, "")
+    )
+
+    split_register_name = clean_text(
+        row.get(OCR_SPLIT_REGISTER_NAME_COLUMN, "")
+    )
+
+    name_score_from_split = row.get(
+        OCR_NAME_SCORE_COLUMN,
+        ""
     )
 
     ocr_pnr = clean_personnummer(
-        row[OCR_PNR_COLUMN]
+        row.get(OCR_PNR_COLUMN, "")
     )
 
-    if bevisnr not in register_lookup:
+    split_register_pnr = clean_personnummer(
+        row.get(OCR_SPLIT_REGISTER_PNR_COLUMN, "")
+    )
 
+    if not bevisnr:
         results.append({
 
-            "bevisnummer": bevisnr,
+            "ocr_bevisnummer": ocr_bevisnr,
+            "resolved_bevisnummer": resolved_bevisnr,
+            "match_method": match_method,
 
             "ocr_name": ocr_name,
+            "split_register_name": split_register_name,
+            "validation_register_name": "",
+            "name_score_from_split": name_score_from_split,
 
             "ocr_personnummer": ocr_pnr,
+            "split_register_personnummer": split_register_pnr,
+            "validation_register_personnummer": "",
 
-            "register_name": "",
+            "ocr_pnr_match": False,
+            "split_register_pnr_match": False,
 
-            "register_personnummer": "",
+            "status": "NO RESOLVED BEVISNUMMER"
+        })
 
-            "name_similarity": 0,
+        not_found += 1
+        continue
 
-            "pnr_match": False,
+    if bevisnr not in register_lookup:
+        results.append({
+
+            "ocr_bevisnummer": ocr_bevisnr,
+            "resolved_bevisnummer": resolved_bevisnr,
+            "match_method": match_method,
+
+            "ocr_name": ocr_name,
+            "split_register_name": split_register_name,
+            "validation_register_name": "",
+            "name_score_from_split": name_score_from_split,
+
+            "ocr_personnummer": ocr_pnr,
+            "split_register_personnummer": split_register_pnr,
+            "validation_register_personnummer": "",
+
+            "ocr_pnr_match": False,
+            "split_register_pnr_match": False,
 
             "status": "NOT FOUND IN REGISTER"
         })
 
         not_found += 1
-
         continue
 
     reg = register_lookup[bevisnr]
 
-    reg_name = clean_text(
-        f"{reg['Efternamn']} {reg['Förnamn']}"
+    validation_register_name = clean_text(
+        f"{reg[REGISTER_LASTNAME_COLUMN]} {reg[REGISTER_FIRSTNAME_COLUMN]}"
     )
 
-    reg_pnr = clean_personnummer(
+    validation_register_pnr = clean_personnummer(
         reg[REGISTER_PNR_COLUMN]
     )
 
-    # fuzzy match namn
-    similarity = fuzz.token_sort_ratio(
+    ocr_name_similarity = fuzz.token_sort_ratio(
         ocr_name,
-        reg_name
+        validation_register_name
     )
 
-    pnr_ok = (
-        ocr_pnr == reg_pnr
+    split_register_name_match = (
+            split_register_name == validation_register_name
     )
 
-    if similarity >= 90 and pnr_ok:
+    ocr_pnr_match = (
+            ocr_pnr == validation_register_pnr
+    )
 
-        status = "MATCH"
+    split_register_pnr_match = (
+            split_register_pnr == validation_register_pnr
+    )
+
+    if split_register_pnr_match:
+
+        status = "VALIDATED"
         matched += 1
 
-    elif not pnr_ok:
+    elif ocr_pnr_match:
+
+        status = "OCR PNR MATCHES REGISTER"
+        matched += 1
+
+    elif ocr_name_similarity >= 90:
+
+        status = "NAME MATCH ONLY"
+        name_mismatch += 1
+
+    else:
 
         status = "PNR MISMATCH"
         pnr_mismatch += 1
 
-    else:
-
-        status = "NAME MISMATCH"
-        name_mismatch += 1
-
     results.append({
 
-        "bevisnummer": bevisnr,
+        "ocr_bevisnummer": ocr_bevisnr,
+        "resolved_bevisnummer": resolved_bevisnr,
+        "match_method": match_method,
 
         "ocr_name": ocr_name,
-
-        "register_name": reg_name,
-
-        "name_similarity": similarity,
+        "split_register_name": split_register_name,
+        "validation_register_name": validation_register_name,
+        "split_register_name_match": split_register_name_match,
+        "ocr_name_similarity": ocr_name_similarity,
+        "name_score_from_split": name_score_from_split,
 
         "ocr_personnummer": ocr_pnr,
+        "split_register_personnummer": split_register_pnr,
+        "validation_register_personnummer": validation_register_pnr,
 
-        "register_personnummer": reg_pnr,
-
-        "pnr_match": pnr_ok,
+        "ocr_pnr_match": ocr_pnr_match,
+        "split_register_pnr_match": split_register_pnr_match,
 
         "status": status
     })

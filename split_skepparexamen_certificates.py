@@ -14,8 +14,13 @@
 import os
 import re
 import sys
+from pathlib import Path
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+import pandas as pd
+from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
 
 from tqdm import tqdm
 from pypdf import PdfReader, PdfWriter
@@ -26,6 +31,14 @@ EXCEL_FILENAME = "index.xlsx"
 VALIDATION_FILENAME = "validation_report.txt"
 UNREADABLE_LOG = "unreadable_volumes.log"
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+REGISTER_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "authoritative_register"
+    / "Skeppare B - fartygsbefäl klass VIII 1980-2000.xlsx"
+)
 
 # --------------------------------------------------
 # LOGGNING
@@ -173,6 +186,371 @@ BLACKLIST_NAMES = [
     "LENNART JOHNSSON",
 
 ]
+
+BAD_NAME_WORDS = [
+    # School / institution text
+    "SJÖBEFÄLSSKOLAN",
+    "SJÖBEFALSSKOLAN",
+    "SJÖBETÄLSSKOLAN",
+    "SJÖBOFÄLSSKOLAN",
+    "SJÖBÖFÄLSSKOLAN",
+    "SJÖLETALSSKULAN",
+    "SJÖLETALSSKOLAN",
+    "SJÖBAEFÄLSSKOLAN",
+    "CHALMERS",
+    "TEKNISKA",
+    "HÖGSKOLA",
+    "HOGSKOLA",
+    "NAUTISKA",
+    "INSTITUTIONEN",
+
+    # Certificate headings
+    "SKEPPAREXAMEN",
+    "BETYG",
+    "AVLAGD",
+    "DATUM",
+    "BEVIS",
+    "INTYG",
+
+    # Form labels
+    "PERSONNR",
+    "PERSONNUMMER",
+    "PERSNR",
+    "POST NR",
+    "POSTADRESS",
+    "ADRESS",
+    "NAMNTECKNING",
+    "EXAMINANDENS",
+    "EXAMINATOR",
+    "EXAMINA",
+    "UNDERSKRIFT",
+    "LÄRARENS",
+    "LARARENS",
+    "REKTOR",
+    "STUDIEREKTOR",
+    "EXAMENSFÖRRÄTTARE",
+    "EXAMENSFORRATTARE",
+    "FÖRRÄTTARE",
+    "FORRATTARE",
+
+    # Roles / titles
+    "ADJUNKT",
+    "LEKTOR",
+    "TIMLÄRARE",
+    "TIMLARARE",
+    "SJÖKAPTEN",
+    "SJOKAPTEN",
+    "LÄRARE",
+    "LARARE",
+
+    # Instruction text
+    "SKRIV",
+    "SAMMA",
+    "NUMMER",
+    "UNDERLIGGANDE",
+    "PAPPER",
+    "OMRÅDE",
+    "OMRADE",
+    "PROV",
+    "PRÖVNING",
+    "PROVNING",
+]
+
+def is_bad_name_candidate(candidate):
+
+    if not candidate:
+        return True
+
+    upper = str(candidate).upper().strip()
+
+    if is_blacklisted_name(upper):
+        return True
+
+    normalized = normalize_name_for_matching(upper)
+
+    if not normalized:
+        return True
+
+    if any(word in upper for word in BAD_NAME_WORDS):
+        return True
+
+    if any(
+            normalize_name_for_matching(word) in normalized
+            for word in BAD_NAME_WORDS
+    ):
+        return True
+
+    words = normalized.split()
+
+    # Need at least surname + first name
+    if len(words) < 2:
+        return True
+
+    # Long strings are usually OCR garbage or whole form lines
+    if len(words) > 5:
+        return True
+
+    # Reject one-letter-heavy garbage like "N", "RR", "EE", "JE"
+    short_words = [
+        w for w in words
+        if len(w) <= 2
+    ]
+
+    if len(short_words) >= 2:
+        return True
+
+    letters = re.sub(
+        r"[^A-ZÅÄÖ]",
+        "",
+        upper
+    )
+
+    if len(letters) < 5:
+        return True
+
+    # Too much repeated OCR-noise text
+    noise_tokens = {
+        "RR", "RDR", "RE", "EE", "JE", "VR", "TR", "FR", "AR",
+        "SAS", "PTS", "SKR", "RNUN", "NNPOST", "FORS"
+    }
+
+    if any(token in words for token in noise_tokens):
+        return True
+
+    return False
+
+def clean_register_bevisnummer(value):
+    """
+    Normaliserar intygsnummer/bevisnummer från registret.
+    Hindrar t.ex. 17853.0 från att bli felaktigt.
+    """
+
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+
+    if not text or text.lower() == "nan":
+        return ""
+
+    try:
+        return str(int(float(text)))
+    except Exception:
+        return re.sub(r"[^0-9]", "", text)
+
+
+def clean_register_personnummer(value):
+    """
+    Normaliserar personnummer från registret.
+    """
+
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+
+    if not text or text.lower() == "nan":
+        return ""
+
+    text = text.replace(" ", "")
+
+    return text
+
+
+def normalize_name_for_matching(text):
+    """
+    OCR-tolerant namnnormalisering för fuzzy matchning mot registret.
+
+    Exempel:
+    KINDSTRÖM -> KINDSTROM
+    K1NDSTR0M -> KINDSTROM
+    """
+
+    if not text:
+        return ""
+
+    text = str(text).upper()
+
+    text = text.replace("Å", "A")
+    text = text.replace("Ä", "A")
+    text = text.replace("Ö", "O")
+
+    # OCR-fel i namn
+    text = text.replace("0", "O")
+    text = text.replace("1", "I")
+    text = text.replace("|", "I")
+    text = text.replace("5", "S")
+
+    text = re.sub(
+        r"[^A-Z\- ]",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+def load_register():
+    """
+    Läser det auktoritativa registret.
+
+    Returnerar:
+    - register_by_bevisnummer
+    - register_by_personnummer
+    - register_name_records
+    """
+
+    if not REGISTER_FILE.exists():
+        raise FileNotFoundError(
+            f"Register file not found: {REGISTER_FILE}"
+        )
+
+    df = pd.read_excel(
+        REGISTER_FILE,
+        dtype=str
+    )
+
+    required_columns = [
+        "Efternamn",
+        "Förnamn",
+        "Personnummer",
+        "Intygsnummer",
+    ]
+
+    missing_columns = [
+        col
+        for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            f"Register is missing columns: {missing_columns}. "
+            f"Found columns: {list(df.columns)}"
+        )
+
+    register_by_bevisnummer = {}
+    register_by_personnummer = {}
+    register_name_records = []
+
+    for _, row in df.iterrows():
+
+        bevisnummer = clean_register_bevisnummer(
+            row["Intygsnummer"]
+        )
+
+        if not bevisnummer:
+            continue
+
+        efternamn = str(
+            row["Efternamn"]
+        ).strip()
+
+        fornamn = str(
+            row["Förnamn"]
+        ).strip()
+
+        full_name = (
+            f"{efternamn} {fornamn}"
+            .strip()
+            .upper()
+        )
+
+        personnummer = clean_register_personnummer(
+            row["Personnummer"]
+        )
+
+        record = {
+            "bevisnummer": bevisnummer,
+            "name": full_name,
+            "normalized_name": normalize_name_for_matching(
+                full_name
+            ),
+            "personnummer": personnummer,
+        }
+
+        register_by_bevisnummer[bevisnummer] = record
+
+        if personnummer:
+            register_by_personnummer[personnummer] = record
+
+        register_name_records.append(record)
+
+    print(
+        f"Loaded {len(register_by_bevisnummer)} register records by bevisnummer"
+    )
+
+    print(
+        f"Loaded {len(register_by_personnummer)} register records by personnummer"
+    )
+
+    print(
+        f"Loaded {len(register_name_records)} register name records"
+    )
+
+    return (
+        register_by_bevisnummer,
+        register_by_personnummer,
+        register_name_records
+    )
+
+
+def match_ocr_names_to_register(
+        ocr_names,
+        register_name_records,
+        min_score=92
+):
+    """
+    Försöker matcha OCR-namn mot registret.
+
+    Används bara när bevisnummer saknas eller inte finns i registret.
+
+    Returnerar:
+        (record, score)
+    eller:
+        (None, 0)
+    """
+
+    if not ocr_names:
+        return None, 0
+
+    best_record = None
+    best_score = 0
+
+    normalized_ocr_names = []
+
+    for name in ocr_names:
+        normalized = normalize_name_for_matching(name)
+
+        if normalized:
+            normalized_ocr_names.append(normalized)
+
+    if not normalized_ocr_names:
+        return None, 0
+
+    for ocr_name in normalized_ocr_names:
+
+        for record in register_name_records:
+
+            score = fuzz.token_sort_ratio(
+                ocr_name,
+                record["normalized_name"]
+            )
+
+            if score > best_score:
+                best_score = score
+                best_record = record
+
+    if best_score >= min_score:
+        return best_record, best_score
+
+    return None, best_score
 
 def normalize_ocr_digit_text(text):
     """
@@ -358,17 +736,19 @@ def extract_personnummer_candidates(text):
 
 def extract_bevisnummer_candidates(text):
     """
-    Extraherar bevisnummer från sidor.
+    Extraherar bevisnummer/intygsnummer från OCR-text.
 
-    Exempel som ska matcha:
-    Bevisnr 17798
-    Nr 17818
-    Nr 25021
-    NR 25051
+    Fångar:
+    - Nr 249938
+    - NR 249938
+    - Bevisnr 17798
+    - Bevis nr. 18015
+    - Intygsnr 249938
 
-    Exempel som INTE ska matcha:
-    SÖ 85-021
-    85-021
+    Undviker:
+    - SÖ 85-021
+    - 85-021
+    - personnummer
     """
 
     if not text:
@@ -381,35 +761,251 @@ def extract_bevisnummer_candidates(text):
     patterns = [
         r"\bBEVIS\s*NR\s*\.?\s*(\d{4,6})\b",
         r"\bBEVISNR\s*\.?\s*(\d{4,6})\b",
+        r"\bINTYG\s*NR\s*\.?\s*(\d{4,6})\b",
+        r"\bINTYGSNR\s*\.?\s*(\d{4,6})\b",
         r"\bNR\s*\.?\s*(\d{4,6})\b",
-        r"\bNR\s+(\d{4,6})\b",
     ]
 
     for pattern in patterns:
-        candidates.extend(
-            re.findall(
-                pattern,
-                t,
-                flags=re.IGNORECASE
-            )
+        matches = re.findall(
+            pattern,
+            t,
+            flags=re.IGNORECASE
         )
+
+        candidates.extend(matches)
 
     cleaned = []
 
     for value in candidates:
-        digits = re.sub(r"[^0-9]", "", value)
+
+        digits = re.sub(
+            r"[^0-9]",
+            "",
+            str(value)
+        )
 
         if not digits:
             continue
 
-        # Undvik mallnummer som 85-021.
-        # Bevisnummer i denna serie verkar ligga som 5-siffriga nummer
-        # eller äldre 4-5-siffriga nummer.
-        if 1000 <= int(digits) <= 99999:
+        # Bevisnummer/intygsnummer kan vara 4-6 siffror.
+        if not (4 <= len(digits) <= 6):
+            continue
+
+        number = int(digits)
+
+        if 1000 <= number <= 999999:
             cleaned.append(digits)
 
-    return sorted(set(cleaned))
+    return list(dict.fromkeys(cleaned))
 
+def get_volume_number_range(volume_hint):
+    """
+    Extracts a numeric range from volume names like:
+    F2AB1 17818-18095
+    F2AB14 24598-25099
+
+    Returns:
+        (low, high)
+    or:
+        (None, None)
+    """
+
+    numbers = re.findall(
+        r"\d+",
+        str(volume_hint)
+    )
+
+    if len(numbers) < 2:
+        return None, None
+
+    low = int(numbers[-2])
+    high = int(numbers[-1])
+
+    return low, high
+
+
+def find_similar_register_bevisnummer(
+        raw_bevisnummer,
+        register_by_bevisnummer,
+        volume_hint="",
+        max_distance=1
+):
+    """
+    Searches the authoritative register for bevisnummer similar to an OCR candidate.
+
+    This does NOT guess a new number.
+    It only returns a corrected number if exactly one nearby number exists
+    in the authoritative register.
+
+    Returns:
+        resolved_bevisnummer, candidates, reason
+
+    Examples:
+        raw 179873 may match register key 17873
+        raw 249138 may produce several candidates and should stay unresolved
+    """
+
+    if not raw_bevisnummer:
+        return "", [], "NO_RAW_BEVISNUMMER"
+
+    digits = re.sub(
+        r"[^0-9]",
+        "",
+        str(raw_bevisnummer)
+    )
+
+    if not digits:
+        return "", [], "NO_DIGITS"
+
+    # Exact register hit is always accepted.
+    if digits in register_by_bevisnummer:
+        return digits, [digits], "EXACT_REGISTER_MATCH"
+
+    # Only attempt similarity search for suspicious OCR values.
+    # This avoids overcorrecting normal 4-5 digit numbers.
+    if len(digits) < 5:
+        return "", [], "TOO_SHORT_FOR_SIMILAR_SEARCH"
+
+    low, high = get_volume_number_range(volume_hint)
+
+    register_keys = list(
+        register_by_bevisnummer.keys()
+    )
+
+    # Prefer searching in the same volume range if we can parse it.
+    if low is not None and high is not None:
+
+        register_keys = [
+            key
+            for key in register_keys
+            if key.isdigit()
+            and low <= int(key) <= high
+        ]
+
+    candidates = []
+
+    for key in register_keys:
+
+        if not key.isdigit():
+            continue
+
+        distance = Levenshtein.distance(
+            digits,
+            key
+        )
+
+        if distance <= max_distance:
+
+            ratio = fuzz.ratio(
+                digits,
+                key
+            )
+
+            candidates.append(
+                {
+                    "key": key,
+                    "distance": distance,
+                    "ratio": ratio,
+                }
+            )
+
+    if not candidates:
+        return "", [], "NO_SIMILAR_REGISTER_MATCH"
+
+    candidates = sorted(
+        candidates,
+        key=lambda item: (
+            item["distance"],
+            -item["ratio"],
+            item["key"]
+        )
+    )
+
+    best_distance = candidates[0]["distance"]
+
+    best_candidates = [
+        item
+        for item in candidates
+        if item["distance"] == best_distance
+    ]
+
+    # Critical safety rule:
+    # only auto-correct if exactly one best candidate exists.
+    if len(best_candidates) == 1:
+        return (
+            best_candidates[0]["key"],
+            candidates,
+            "UNIQUE_SIMILAR_REGISTER_MATCH"
+        )
+
+    return (
+        "",
+        candidates,
+        "AMBIGUOUS_SIMILAR_REGISTER_MATCH"
+    )
+
+def resolve_ocr_bevisnummer_against_register(
+        raw_candidates,
+        register_by_bevisnummer,
+        volume_hint,
+        validation
+):
+    """
+    Selects OCR bevisnummer, then tries to resolve suspicious values
+    against the authoritative register.
+
+    Returns:
+        ocr_bevisnummer, resolved_candidate
+    """
+
+    if not raw_candidates:
+        return "", ""
+
+    counter = Counter(raw_candidates)
+
+    raw_bevisnummer = counter.most_common(1)[0][0]
+
+    resolved, similar_candidates, reason = find_similar_register_bevisnummer(
+        raw_bevisnummer,
+        register_by_bevisnummer,
+        volume_hint=volume_hint,
+        max_distance=1
+    )
+
+    if reason == "EXACT_REGISTER_MATCH":
+
+        return raw_bevisnummer, resolved
+
+    if reason == "UNIQUE_SIMILAR_REGISTER_MATCH":
+
+        validation.append(
+            f"Resolved OCR bevisnummer by register similarity: "
+            f"raw={raw_bevisnummer}, resolved={resolved}, "
+            f"reason={reason}"
+        )
+
+        return raw_bevisnummer, resolved
+
+    if reason == "AMBIGUOUS_SIMILAR_REGISTER_MATCH":
+
+        validation.append(
+            f"Ambiguous OCR bevisnummer similarity search: "
+            f"raw={raw_bevisnummer}, "
+            f"candidates={similar_candidates}"
+        )
+
+        # Do not guess. Return raw OCR candidate and let PNR/name fallback handle it.
+        return raw_bevisnummer, raw_bevisnummer
+
+    if reason == "NO_SIMILAR_REGISTER_MATCH":
+
+        validation.append(
+            f"No similar register bevisnummer found for OCR candidate: "
+            f"raw={raw_bevisnummer}"
+        )
+
+    return raw_bevisnummer, raw_bevisnummer
 # ---------
 # FÖR OCH EFTERNAMN
 # -------------
@@ -420,29 +1016,45 @@ def extract_name_candidates(text):
         return []
 
     candidates = []
-
     priority_candidates = []
 
     upper = text.upper()
 
+    #
+    # Priority 1:
+    # Structured fields: EFTERNAMN / TILLTALSNAMN
+    #
+
     pattern = re.compile(
-        r"EFTERNAMN([A-ZÅÄÖ\-]+)"
-        r".{0,80}?"
-        r"TILLTALSNAMN([A-ZÅÄÖ ]+)",
+        r"(?:EFTERNAMN|FTERNAMN|EFTENAMN|EFTERNAM)\s*([A-ZÅÄÖ\-]+)"
+        r".{0,100}?"
+        r"(?:TILLTALSNAMN|TILLTALSNAM|TILLTALSNARNN)\s*([A-ZÅÄÖ ]+?)"
+        r"(?:PERSONNR|PERSONNUMMER|PARSONNR|PERSNR|$)",
         re.DOTALL
     )
 
     for match in pattern.finditer(upper):
-        surname = match.group(1).strip()
 
+        surname = match.group(1).strip()
         firstname = match.group(2).strip()
 
-        priority_candidates.append(
-            f"{surname} {firstname}"
-        )
+        candidate = f"{surname} {firstname}"
+
+        candidate = clean_name_candidate(candidate)
+
+        if not candidate:
+            continue
+
+        if not is_bad_name_candidate(candidate):
+            priority_candidates.append(candidate)
 
     if priority_candidates:
-        return priority_candidates
+        return list(dict.fromkeys(priority_candidates))
+
+    #
+    # Priority 2:
+    # Fallback around PERSONNR / PERSONNUMMER
+    #
 
     lines = text.splitlines()
 
@@ -450,18 +1062,20 @@ def extract_name_candidates(text):
         "PERSONNR",
         "PERSONNUMMER",
         "PARSONNR",
-        "PARSONNUMMER"
+        "PARSONNUMMER",
+        "PERSNR",
     ]
 
     for i, line in enumerate(lines):
 
-        upper = line.upper()
+        upper_line = line.upper()
 
-        if not any(m in upper for m in markers):
+        if not any(m in upper_line for m in markers):
             continue
 
-        # mycket större sökfönster
-        window = lines[max(0, i - 5): min(len(lines), i + 5)]
+        window = lines[
+            max(0, i - 5): min(len(lines), i + 5)
+        ]
 
         for candidate in window:
 
@@ -470,24 +1084,27 @@ def extract_name_candidates(text):
             if len(candidate) < 5:
                 continue
 
-            # ta bort personnummer om de ligger på raden
+            # Remove personnummer from candidate line
             candidate = re.sub(
                 r"\d{6}[- ]?\d{4}",
                 "",
                 candidate
             )
 
-            candidate = candidate.strip()
+            candidate = clean_name_candidate(candidate)
+
+            if not candidate:
+                continue
 
             words = candidate.split()
 
             if len(words) < 2:
                 continue
 
-            if is_blacklisted_name(candidate):
+            if is_bad_name_candidate(candidate):
                 continue
 
-            # alla ord måste vara bokstavsliknande
+            # All words must be name-like
             if all(
                 re.fullmatch(
                     r"[A-Za-zÅÄÖåäö\-]+",
@@ -495,28 +1112,9 @@ def extract_name_candidates(text):
                 )
                 for w in words
             ):
-
-                bad_words = [
-
-                    "ADJUNKT",
-                    "LEKTOR",
-                    "TIMLÄRARE",
-                    "SJÖKAPTEN",
-                    "EXAMENSFÖRRÄTTARE",
-                    "LÄRARE"
-
-                ]
-
-                if any(
-                        word in candidate.upper()
-                        for word in bad_words
-                ):
-                    continue
                 candidates.append(candidate)
 
     return list(dict.fromkeys(candidates))
-
-
 # --------------------------------------------------
 # SIDTYPER
 # --------------------------------------------------
@@ -671,12 +1269,235 @@ def is_blacklisted_name(candidate):
         for blocked in BLACKLIST_NAMES
     )
 
-# --------------------------------------------------
+def validate_bevisnummer_against_ocr(
+        bevisnummer,
+        ocr_name,
+        ocr_pnr,
+        register_by_bevisnummer,
+        register_by_personnummer=None,
+        min_name_score=85
+):
+    """
+    Kontrollerar om ett OCR-bevisnummer verkar stämma med OCR-namn/personnummer.
+
+    Princip:
+    - Bevisnummer som finns i registret är stark evidens.
+    - Dåligt OCR-personnummer ska inte automatiskt avvisa bevisnumret.
+    - Dåligt OCR-namn ska ignoreras.
+    - Bevisnummer avvisas främst om OCR-personnummer tydligt pekar på en annan registerpost.
+    """
+
+    if not bevisnummer:
+        return None, False, "NO_BEVISNUMMER", 0
+
+    if bevisnummer not in register_by_bevisnummer:
+        return None, False, "BEVISNUMMER_NOT_IN_REGISTER", 0
+
+    record = register_by_bevisnummer[bevisnummer]
+
+    register_pnr = record.get("personnummer", "")
+    register_name = record.get("name", "")
+
+    usable_ocr_name = ""
+
+    if ocr_name and not is_bad_name_candidate(ocr_name):
+        usable_ocr_name = ocr_name
+
+    # 1. Strongest case: OCR personnummer matches this register record.
+    if ocr_pnr and register_pnr and ocr_pnr == register_pnr:
+        return record, True, "BEVISNUMMER_VALIDATED_BY_PNR", 100
+
+    # 2. OCR personnummer differs from this bevisnummer's register record.
+    if ocr_pnr and register_pnr and ocr_pnr != register_pnr:
+
+        other_record = None
+
+        if register_by_personnummer:
+            other_record = register_by_personnummer.get(ocr_pnr)
+
+        if (
+            other_record
+            and other_record.get("bevisnummer") != bevisnummer
+        ):
+            return (
+                record,
+                False,
+                "BEVISNUMMER_REJECTED_PNR_POINTS_TO_OTHER_RECORD",
+                0
+            )
+
+        if usable_ocr_name:
+
+            score = fuzz.token_sort_ratio(
+                normalize_name_for_matching(usable_ocr_name),
+                normalize_name_for_matching(register_name)
+            )
+
+            if score >= min_name_score:
+                return (
+                    record,
+                    True,
+                    "BEVISNUMMER_VALIDATED_BY_NAME_PNR_WARNING",
+                    score
+                )
+
+            return (
+                record,
+                False,
+                "BEVISNUMMER_REJECTED_NAME_AND_PNR_MISMATCH",
+                score
+            )
+
+        return (
+            record,
+            True,
+            "BEVISNUMMER_ACCEPTED_PNR_WARNING",
+            0
+        )
+
+    # 3. No reliable OCR personnummer. Use name if usable.
+    if usable_ocr_name and register_name:
+
+        score = fuzz.token_sort_ratio(
+            normalize_name_for_matching(usable_ocr_name),
+            normalize_name_for_matching(register_name)
+        )
+
+        if score >= min_name_score:
+            return record, True, "BEVISNUMMER_VALIDATED_BY_NAME", score
+
+        return (
+            record,
+            False,
+            "BEVISNUMMER_REJECTED_NAME_MISMATCH",
+            score
+        )
+
+    # 4. Bevisnummer exists in register, but no usable secondary evidence.
+    return (
+        record,
+        True,
+        "BEVISNUMMER_ACCEPTED_NO_USABLE_SECONDARY",
+        0
+    )
+
+def generate_pnr_variants(pnr):
+
+    if not pnr:
+        return []
+
+    digits = re.sub(
+        r"[^0-9]",
+        "",
+        pnr
+    )
+
+    if len(digits) != 10:
+        return []
+
+    variants = []
+
+    exact = f"{digits[:6]}-{digits[6:]}"
+    variants.append(exact)
+
+    first_digit_alternatives = {
+        "0": ["6"],
+        "1": ["7"],
+        "2": ["5"],
+        "3": ["8"],
+        "5": ["2"],
+        "6": ["0"],
+        "7": ["1"],
+        "8": ["3"],
+        "9": ["5"],
+    }
+
+    first = digits[0]
+
+    for alt in first_digit_alternatives.get(first, []):
+
+        alt_digits = alt + digits[1:]
+
+        variant = f"{alt_digits[:6]}-{alt_digits[6:]}"
+
+        if variant not in variants:
+            variants.append(variant)
+
+    return variants
+
+def clean_name_candidate(candidate):
+
+    if not candidate:
+        return ""
+
+    text = str(candidate).strip()
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    # Remove leading OCR artifacts like "N "
+    text = re.sub(
+        r"^(N|M|RN|NR)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Remove trailing labels accidentally attached
+    text = re.sub(
+        r"\b(PERSONNR|PERSONNUMMER|PERSNR|POSTADRESS|POST NR)\b.*$",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    return text
+#--------------------------------------------------
 # PROCESS ONE PDF
 # --------------------------------------------------
 
+def match_pnr_to_register(
+        ocr_pnr,
+        register_by_personnummer
+):
+    """
+    Fallback på personnummer.
+
+    Först exakt match.
+    Sedan vanliga OCR-varianter på första siffran i YYMMDD.
+    """
+
+    if not ocr_pnr:
+        return None
+
+    for candidate in generate_pnr_variants(ocr_pnr):
+
+        record = register_by_personnummer.get(candidate)
+
+        if record:
+            return record
+
+    return None
+
 def process_pdf(args):
-    pdf_path, input_root, output_root, config = args
+    (
+        pdf_path,
+        input_root,
+        output_root,
+        config,
+        register_by_bevisnummer,
+        register_by_personnummer,
+        register_name_records,
+    ) = args
 
     rows = []
     validation = []
@@ -747,6 +1568,13 @@ def process_pdf(args):
         all_names = []
         all_bevisnummer = []
 
+        match_method = "UNMATCHED"
+
+        register_name = ""
+        register_personnummer = ""
+        name_match_score = 0
+        ocr_bevisnummer = ""
+
         #
         # Bevisnummer söks endast på de två första sidorna
         # eftersom de nästan alltid finns där
@@ -766,6 +1594,7 @@ def process_pdf(args):
             all_bevisnummer.extend(
                 extract_bevisnummer_candidates(text)
             )
+
 
         for p in range(start, end):
 
@@ -793,23 +1622,187 @@ def process_pdf(args):
 
         ocr_name = ""
 
-        if all_names:
-            name_counter = Counter(all_names)
+        cleaned_names = []
+
+        for name in all_names:
+
+            cleaned = clean_name_candidate(name)
+
+            if not cleaned:
+                continue
+
+            if is_bad_name_candidate(cleaned):
+                continue
+
+            cleaned_names.append(cleaned)
+
+        filtered_names = list(
+            dict.fromkeys(cleaned_names)
+        )
+
+        if filtered_names:
+            name_counter = Counter(filtered_names)
 
             ocr_name = (
                 name_counter.most_common(1)[0][0]
             )
 
+        ocr_bevisnummer = ""
         bevisnummer = ""
 
         if all_bevisnummer:
-            bevis_counter = Counter(
-                all_bevisnummer
+            (
+                ocr_bevisnummer,
+                bevisnummer
+            ) = resolve_ocr_bevisnummer_against_register(
+                raw_candidates=all_bevisnummer,
+                register_by_bevisnummer=register_by_bevisnummer,
+                volume_hint=volym,
+                validation=validation
             )
 
-            bevisnummer = (
-                bevis_counter.most_common(1)[0][0]
+        #
+        # PRIORITET 1: Bevisnummer mot register
+        #
+
+        #
+        # PRIORITET 1:
+        # OCR-bevisnummer, men bara om det stämmer med namn/personnummer i registret
+        #
+
+        reg_record = None
+        name_match_score = 0
+
+        if bevisnummer:
+
+            (
+                candidate_record,
+                accepted,
+                reason,
+                score
+            ) = validate_bevisnummer_against_ocr(
+                bevisnummer=bevisnummer,
+                ocr_name=ocr_name,
+                ocr_pnr=pnr,
+                register_by_bevisnummer=register_by_bevisnummer,
+                register_by_personnummer=register_by_personnummer,
+                min_name_score=85
             )
+
+            name_match_score = score
+
+            if accepted and candidate_record:
+
+                reg_record = candidate_record
+
+                match_method = reason
+
+                register_name = reg_record["name"]
+                register_personnummer = reg_record["personnummer"]
+
+                validation.append(
+                    f"Accepted OCR bevisnummer {bevisnummer}: "
+                    f"{register_name}, reason={reason}"
+                )
+
+
+            else:
+                validation.append(
+                    f"Rejected OCR bevisnummer {bevisnummer}: "
+                    f"reason={reason}, "
+                    f"ocr_name={ocr_name}, "
+                    f"ocr_pnr={pnr}"
+                )
+
+                strong_rejection_reasons = {
+                    "BEVISNUMMER_NOT_IN_REGISTER",
+                    "BEVISNUMMER_REJECTED_PNR_POINTS_TO_OTHER_RECORD",
+                    "BEVISNUMMER_REJECTED_NAME_AND_PNR_MISMATCH",
+                    "BEVISNUMMER_REJECTED_NAME_MISMATCH",
+                }
+
+                if reason in strong_rejection_reasons:
+                    bevisnummer = ""
+
+                else:
+                    reg_record = candidate_record
+
+                    if reg_record:
+                        match_method = reason
+                        register_name = reg_record["name"]
+                        register_personnummer = reg_record["personnummer"]
+
+        #
+        # PRIORITET 2:
+        # Exakt personnummer mot register
+        #
+
+        if not reg_record and pnr:
+
+            pnr_record = match_pnr_to_register(
+                pnr,
+                register_by_personnummer
+            )
+
+            if pnr_record:
+                reg_record = pnr_record
+
+                match_method = "PNR_FALLBACK"
+
+                bevisnummer = reg_record["bevisnummer"]
+                register_name = reg_record["name"]
+                register_personnummer = reg_record["personnummer"]
+
+                validation.append(
+                    f"PNR fallback matched {pnr}: "
+                    f"{register_name}, bevisnummer={bevisnummer}"
+                )
+
+        #
+        # PRIORITET 3:
+        # Namn-fallback mot register
+        #
+
+        if not reg_record:
+
+            reg_record, score = match_ocr_names_to_register(
+                filtered_names,
+                register_name_records,
+                min_score=88
+            )
+
+            name_match_score = score
+
+            if reg_record:
+                match_method = "NAME_FALLBACK"
+
+                bevisnummer = reg_record["bevisnummer"]
+                register_name = reg_record["name"]
+                register_personnummer = reg_record["personnummer"]
+
+                validation.append(
+                    f"Name fallback matched OCR names {filtered_names} "
+                    f"to {register_name} "
+                    f"with score {score}. "
+                    f"Resolved bevisnummer={bevisnummer}"
+                )
+
+        #
+        # PRIORITET 4:
+        # Ingen träff
+        #
+
+        if not reg_record:
+            match_method = "UNMATCHED"
+
+            validation.append(
+                f"No register match. "
+                f"ocr_bevisnummer={ocr_bevisnummer}, "
+                f"ocr_name={ocr_name}, "
+                f"ocr_pnr={pnr}, "
+                f"best_name_score={name_match_score}"
+            )
+
 
         if not pnr:
             validation.append(
@@ -884,12 +1877,22 @@ def process_pdf(args):
             [
                 out_name,
                 volym,
+
+                ocr_bevisnummer,
                 bevisnummer,
+                match_method,
+
                 ocr_name,
+                register_name,
+                name_match_score,
+
                 pnr,
+                register_personnummer,
+
                 ";".join(unique_bevisnummer),
                 ";".join(unique_pnrs),
                 ";".join(all_names),
+
                 start + 1,
                 end,
             ]
@@ -897,6 +1900,51 @@ def process_pdf(args):
 
     return rows, validation
 
+
+def apply_sequence_fallback(all_rows):
+    """
+    Conservative sequence repair.
+
+    Only fills resolved_bevisnummer when:
+    - current row is UNMATCHED
+    - previous and next rows have numeric resolved_bevisnummer
+    - previous + 2 == next
+    - current row is between them
+    """
+
+    # Column positions in rows
+    FILE_COL = 0
+    OCR_BEVIS_COL = 2
+    RESOLVED_BEVIS_COL = 3
+    MATCH_METHOD_COL = 4
+
+    for i in range(1, len(all_rows) - 1):
+
+        row = all_rows[i]
+        prev_row = all_rows[i - 1]
+        next_row = all_rows[i + 1]
+
+        if row[MATCH_METHOD_COL] != "UNMATCHED":
+            continue
+
+        prev_bnr = str(prev_row[RESOLVED_BEVIS_COL]).strip()
+        next_bnr = str(next_row[RESOLVED_BEVIS_COL]).strip()
+
+        if not prev_bnr.isdigit():
+            continue
+
+        if not next_bnr.isdigit():
+            continue
+
+        expected = int(prev_bnr) + 1
+
+        if expected + 1 != int(next_bnr):
+            continue
+
+        row[RESOLVED_BEVIS_COL] = str(expected)
+        row[MATCH_METHOD_COL] = "SEQUENCE_FALLBACK"
+
+    return all_rows
 
 # --------------------------------------------------
 # MAIN
@@ -906,6 +1954,9 @@ def process_all(
     input_root,
     output_root,
     config,
+    register_by_bevisnummer,
+    register_by_personnummer,
+    register_name_records,
     log_callback=None,
     progress_callback=None
 ):
@@ -1004,7 +2055,10 @@ def process_all(
                     pdf_path,
                     input_root,
                     output_root,
-                    config
+                    config,
+                    register_by_bevisnummer,
+                    register_by_personnummer,
+                    register_name_records,
                 )
             )
 
@@ -1063,6 +2117,8 @@ def process_all(
         exist_ok=True
     )
 
+    #all_rows = apply_sequence_fallback(all_rows) #commented out for debug
+
     # Excel
     wb = Workbook()
     ws = wb.active
@@ -1071,12 +2127,22 @@ def process_all(
         [
             "file name",
             "volym",
-            "bevisnummer",
+
+            "ocr_bevisnummer",
+            "resolved_bevisnummer",
+            "match_method",
+
             "ocr_name",
+            "register_name",
+            "name_match_score",
+
             "ocr_personnummer",
+            "register_personnummer",
+
             "all_bevisnummer_candidates",
             "all_personnummer_candidates",
             "all_name_candidates",
+
             "start_page",
             "end_page_exclusive",
         ]
@@ -1156,8 +2222,17 @@ if __name__ == "__main__":
 
     config = get_default_config()
 
+    (
+        register_by_bevisnummer,
+        register_by_personnummer,
+        register_name_records
+    ) = load_register()
+
     process_all(
         sys.argv[1],
         sys.argv[2],
-        config
+        config,
+        register_by_bevisnummer,
+        register_by_personnummer,
+        register_name_records
     )
