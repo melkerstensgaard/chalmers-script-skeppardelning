@@ -2044,11 +2044,21 @@ def process_pdf(args):
 
                 ocr_bevisnummer,
                 bevisnummer,
+                match_method,
 
+                ocr_name,
                 register_name,
+                name_match_score,
 
                 pnr,
                 register_personnummer,
+
+                ";".join(unique_bevisnummer),
+                ";".join(unique_pnrs),
+                ";".join(all_names),
+
+                start + 1,
+                end,
             ]
         )
 
@@ -2397,7 +2407,20 @@ def process_all(
     )
 
     for row in all_rows:
-        ws.append(row)
+        ws.append(
+            [
+                row[0],  # file name
+                row[1],  # volym
+
+                row[2],  # ocr_bevisnummer
+                row[3],  # resolved_bevisnummer
+
+                row[6],  # register_name
+
+                row[8],  # ocr_personnummer
+                row[9],  # register_personnummer
+            ]
+        )
 
     excel_path = os.path.join(
         output_root,
