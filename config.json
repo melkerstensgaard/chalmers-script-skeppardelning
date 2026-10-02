@@ -1,0 +1,7 @@
+{
+  "ocr_language": "swe+eng",
+  "render_dpi": 300,
+  "run_image_ocr_when_no_embedded_candidate": true,
+  "ocr_variants": ["gray", "contrast", "threshold"],
+  "hash_sources": true
+}
