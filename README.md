@@ -1,58 +1,21 @@
-# Sjöfartsbevis 0.3
+# Sjöfartsbevisprojekt v0.4.2 batch
 
-Batchbaserad första projektversion för import, analys, mänsklig granskning och export av sjöfartsutbildningsbevis.
+## Nytt
+- Projektknapparna ligger horisontellt överst. Vänsterpanelen är borttagen.
+- PDF-fönstret är större och kan ändras med avdelaren mellan PDF och granskningspanelen.
+- Zoom med `+`, `−`, **Anpassa** eller `Ctrl+mushjul`.
+- Panorering med mittenknappen och rullning med rullningslisterna.
+- Markera OCR-text direkt på PDF-sidan genom att dra en rektangel över orden. Kopiera med `Ctrl+C`.
+- Knappen **Kopiera all OCR** och den separata OCR-rutan är borttagna.
+- Tidigare export, index, personnummerkälla, F1–F6 och progress på dokument/volym/serie är bevarade.
 
-## Input
+## Viktigt om direkt textmarkering
+Direkt markering använder PDF-sidans textlager via PyMuPDF. Den fungerar när PDF-filen innehåller sökbar/OCR-tolkad text. Om en sida endast består av en bild måste PDF-filen först OCR-behandlas så att ett textlager finns.
 
-Du kan välja antingen en signummapp eller rotmappen med samtliga signummappar:
-
-```text
-input/
-├── F2AB1/
-│   ├── scan_001.pdf
-│   └── scan_002.pdf
-├── F2AB2/
-│   └── scan_003.pdf
-└── F2AB23/
-    └── scan_004.pdf
-```
-
-Mappnamnet används som signum. Alla PDF-filer registreras i samma SQLite-databas.
-
-## Installation
-
+## Start
 ```powershell
 python -m venv .venv
-.venv\Scriptsctivate
+.venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
-
-Tesseract med svenska språkdata behöver vara installerat och finnas i PATH.
-
-## Arbetsflöde
-
-1. Välj **Importera signummapp eller alla volymer**.
-2. Välj inputrot, outputmapp och arbetsmapp.
-3. Alla PDF-filer registreras och analyseras.
-4. Arbetsstatus sparas löpande i `review.sqlite`.
-5. Öppna samma databas vid senare arbetstillfällen utan ny analys.
-6. Granska sidorna och klassificera dem.
-7. Exportera alla färdiggranskade PDF-volymer.
-
-## Återupptagning
-
-Om analysen avbryts fortsätter en ny import av samma rotmapp från första saknade sidan. Helt analyserade PDF-filer hoppas över.
-
-## Output
-
-```text
-output/F2AB1/scan_001/
-├── utbildningsbevis/
-├── provpapper/
-├── bilagor/
-├── andra_handlingar/
-└── index.csv
-```
-
-Original-PDF-filer skrivs inte över. Exporterade dokument byggs av originalsidornas PDF-objekt.

@@ -1,40 +1,84 @@
+import re
 from pathlib import Path
-from pypdf import PdfReader,PdfWriter
-import csv,re
+from pypdf import PdfReader, PdfWriter
+from .structure import structure_parts
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 
-def safe(value): return re.sub(r'[^0-9A-Za-zÅÄÖåäö_-]+','_',value or 'SAKNAS')
-def write_pages(reader,indices,path):
-    writer=PdfWriter()
-    for i in indices: writer.add_page(reader.pages[i])
-    with open(path,'wb') as f: writer.write(f)
-def export_volume(db,volume,target):
-    pages=db.pages(volume['id']);errors=[];current_exists=False
-    for p in pages:
-        if p['review_status']!='reviewed' or p['page_class']=='uncertain':errors.append(f"Sida {p['page_index']+1} är inte slutgranskad")
-        if p['page_class'] in ('new_certificate','unreadable'):current_exists=True
-        elif p['page_class']=='continuation' and not current_exists:errors.append(f"Sida {p['page_index']+1} är fortsättning utan föregående bevis")
-    if errors: raise ValueError('\n'.join(errors))
-    out=Path(target);cert=out/'utbildningsbevis';cert.mkdir(parents=True,exist_ok=True);reader=PdfReader(volume['source_path']);docs=[];cur=None
-    folders={'exam_paper':'provpapper','attachment':'bilagor','other_document':'andra_handlingar'}
-    for p in pages:
-        cls=p['page_class']
-        if cls in ('new_certificate','unreadable'):
-            if cur:docs.append(cur)
-            cur={'pages':[p['page_index']],'pn':p['final_personnummer'],'score':p['confidence_score'],'status':cls}
-        elif cls=='continuation':cur['pages'].append(p['page_index'])
-        elif cls in folders:
-            d=out/folders[cls];d.mkdir(parents=True,exist_ok=True);write_pages(reader,[p['page_index']],d/f"{safe(volume['signum'])}_sida_{p['page_index']+1:06d}.pdf")
-    if cur:docs.append(cur)
-    rows=[]
-    for n,d in enumerate(docs,1):
-        marker=d['pn'] or ('OLASLIGT' if d['status']=='unreadable' else 'SAKNAS');name=f"{safe(volume['signum'])}_{n:06d}_{safe(marker)}.pdf";write_pages(reader,d['pages'],cert/name)
-        rows.append([name,volume['signum'],volume['source_name'],d['pages'][0]+1,d['pages'][-1]+1,d['pn'] or '',d['score']])
-    with open(out/'index.csv','w',newline='',encoding='utf-8-sig') as f:csv.writer(f).writerows([['filename','signum','source_filename','start_page','end_page','personnummer','confidence_score'],*rows])
-    db.set_exported(volume['id']);return rows
-def export_project(db,project_id):
-    project=db.project(project_id);done=[];failed=[]
-    for volume in db.volumes(project_id):
-        target=Path(project['output_root'])/safe(volume['signum'])/safe(Path(volume['source_name']).stem)
-        try:export_volume(db,volume,target);done.append(volume['source_name'])
-        except Exception as exc:failed.append(f"{volume['signum']} / {volume['source_name']}: {exc}")
-    return done,failed
+def safe(value):
+    return re.sub(r"[^0-9A-Za-zÅÄÖåäö._-]+", "_", value or "utan_personnummer")
+
+def export_project(db, output):
+    output=Path(output); output.mkdir(parents=True,exist_ok=True)
+    groups=[]; current=None
+    for row in db.pages():
+        classification=row["classification"] or "ogranskad"
+        if classification=="nytt_bevis":
+            current={"type":"bevis","rows":[row]}; groups.append(current)
+        elif classification=="tillhor_foregaende" and current:
+            current["rows"].append(row)
+        else:
+            current={"type":classification,"rows":[row]}; groups.append(current)
+    readers={}; index=[]; counters={}
+    for group in groups:
+        first=group["rows"][0]; relative=Path(first["relative_pdf"]); series,volume=structure_parts(relative)
+        key=(str(relative.parent),relative.stem); counters[key]=counters.get(key,0)+1
+        filename=f'{relative.stem}_{counters[key]:04d}_{safe(first["personnummer"])}.pdf'
+        destination=output/relative.parent; destination.mkdir(parents=True,exist_ok=True); writer=PdfWriter()
+        for row in group["rows"]:
+            if row["source_pdf"] not in readers: readers[row["source_pdf"]]=PdfReader(row["source_pdf"])
+            writer.add_page(readers[row["source_pdf"]].pages[row["page_number"]-1])
+        with (destination/filename).open("wb") as file: writer.write(file)
+        sources={row["personnummer_source"] for row in group["rows"] if row["personnummer_source"]}
+        source="människa" if "människa" in sources else ("skript" if "skript" in sources else "")
+        index.append([filename,volume,series,first["personnummer"],group["type"],source])
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Index"
+
+    headers = [
+        "Filnamn",
+        "Volym",
+        "Serie",
+        "Personnummer",
+        "Dokumenttyp",
+        "Personnummer bestämt av",
+    ]
+
+    worksheet.append(headers)
+
+    for row in index:
+        worksheet.append(row)
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+
+    # Behandla personnummer som text så att Excel inte ändrar formatet.
+    for cell in worksheet["D"][1:]:
+        cell.number_format = "@"
+
+    # Aktivera filter och lås rubrikraden.
+    worksheet.auto_filter.ref = worksheet.dimensions
+    worksheet.freeze_panes = "A2"
+
+    # Anpassa kolumnbredderna efter innehållet.
+    for column_cells in worksheet.columns:
+        max_length = 0
+
+        for cell in column_cells:
+            value = "" if cell.value is None else str(cell.value)
+            max_length = max(max_length, len(value))
+
+        column_letter = get_column_letter(
+            column_cells[0].column
+        )
+
+        worksheet.column_dimensions[column_letter].width = min(
+            max_length + 2,
+            60
+        )
+
+    index_path = output / "index.xlsx"
+    workbook.save(index_path)
+    return len(groups)

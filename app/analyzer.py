@@ -1,32 +1,27 @@
-import statistics
+import re
 import fitz
-import pytesseract
-from PIL import Image, ImageOps, ImageEnhance
-from app.personnummer import find_candidates, score_candidate
+from PIL import Image
 
-class Analyzer:
-    def __init__(self, language='swe+eng', dpi=300, image_ocr=True):
-        self.language,self.dpi,self.image_ocr=language,dpi,image_ocr
-    def analyze_page(self, page):
-        embedded=page.get_text('text') or ''
-        observations=[(raw,val,'embedded_text',95.0) for raw,val in find_candidates(embedded)]
-        if not observations and self.image_ocr:
-            observations.extend(self._image_ocr(page))
-        grouped={}
-        for raw,val,source,conf in observations: grouped.setdefault(val,[]).append((raw,source,conf))
-        rows=[]
-        for val,items in grouped.items():
-            avg=statistics.mean(x[2] for x in items);score,reasons=score_candidate(val,len(items),avg)
-            rows.append((items[0][0],val,','.join(sorted({x[1] for x in items})),avg,score,'; '.join(reasons)))
-        rows.sort(key=lambda x:x[4],reverse=True)
-        return embedded,rows
-    def _image_ocr(self,page):
-        zoom=self.dpi/72; pix=page.get_pixmap(matrix=fitz.Matrix(zoom,zoom),colorspace=fitz.csRGB,alpha=False)
-        image=Image.frombytes('RGB',(pix.width,pix.height),pix.samples);gray=ImageOps.grayscale(image)
-        variants={'gray':gray,'contrast':ImageEnhance.Contrast(gray).enhance(2.0),'threshold':gray.point(lambda p:255 if p>170 else 0)}
-        found=[]
-        for name,img in variants.items():
-            data=pytesseract.image_to_data(img,lang=self.language,config='--psm 11',output_type=pytesseract.Output.DICT)
-            text=' '.join(t for t in data['text'] if t.strip());confs=[float(c) for c in data['conf'] if str(c) not in ('-1','')];conf=sum(confs)/len(confs) if confs else 0
-            found.extend((raw,val,'image_'+name,conf) for raw,val in find_candidates(text))
-        return found
+PNR = re.compile(r"(?<!\d)(\d{6}|\d{8})[-+ ]?(\d{4})(?!\d)")
+
+def analyze(text):
+    match = PNR.search(text)
+    pnr = match.group(1) + "-" + match.group(2) if match else ""
+    score = 45 if pnr else 0
+    reasons = [f"Personnummer hittat: {pnr}" if pnr else "Inget personnummer hittades"]
+    for word, value in {"bevis":20,"intyg":15,"prov":-8,"bilaga":-5}.items():
+        if word in text.lower():
+            score += value; reasons.append(f"{word}: {value:+d} poäng")
+    return max(0,min(100,score)), pnr, reasons
+
+def extract_text(page):
+    text = page.get_text("text") or ""
+    if len(text.strip()) > 30:
+        return text
+    try:
+        import pytesseract
+        pix = page.get_pixmap(matrix=fitz.Matrix(2,2), alpha=False)
+        image = Image.frombytes("RGB", [pix.width,pix.height], pix.samples)
+        return pytesseract.image_to_string(image, lang="swe+eng")
+    except Exception:
+        return text

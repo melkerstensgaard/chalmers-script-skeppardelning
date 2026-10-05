@@ -1,4 +1,4 @@
-from app.gui import run_app
+from app.gui import ReviewApp
 
 if __name__ == "__main__":
-    run_app()
+    ReviewApp().run()
