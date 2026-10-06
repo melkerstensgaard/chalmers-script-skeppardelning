@@ -54,7 +54,7 @@ class ReviewApp:
         # Faktiskt granskat innehåll.
         self.review_progress = [
             tk.DoubleVar()
-            for _ in range(3)
+            for _ in range(5)
         ]
 
         self.review_progress_text = [
@@ -63,6 +63,8 @@ class ReviewApp:
                 "Granskade sidor: –",
                 "Granskade dokument: –",
                 "Färdiga volymer: –",
+                "Personnummer från skript: –",
+                "Personnummer korrigerade av människa: –",
             )
         ]
 
@@ -234,7 +236,7 @@ class ReviewApp:
             weight=1
         )
 
-        for i in range(3):
+        for i in range(5):
             ttk.Label(
                 review_frame,
                 textvariable=self.review_progress_text[i],
@@ -1117,6 +1119,8 @@ class ReviewApp:
             "Granskade sidor: –",
             "Granskade dokument: –",
             "Färdiga volymer: –",
+            "Personnummer från skript: –",
+            "Personnummer korrigerade av människa: –",
         ]
 
         for index in range(3):
@@ -1314,7 +1318,17 @@ class ReviewApp:
         # -------------------------------------------------
         # Faktiskt granskat innehåll
         # -------------------------------------------------
+        script_personnummer = sum(
+            1
+            for row in self.rows
+            if row["personnummer_source"] == "skript"
+        )
 
+        human_personnummer = sum(
+            1
+            for row in self.rows
+            if row["personnummer_source"] == "människa"
+        )
         total_pages = len(
             self.rows
         )
@@ -1389,23 +1403,36 @@ class ReviewApp:
                 reviewed_volumes,
                 total_volumes
             ),
+            (
+                script_personnummer,
+                total_pages
+            ),
+            (
+                human_personnummer,
+                total_pages
+            )
         ]
 
         review_labels = [
             (
                 f"Granskade sidor: "
-                f"{reviewed_pages}/"
-                f"{total_pages}"
+                f"{reviewed_pages}/{total_pages}"
             ),
             (
                 f"Granskade dokument: "
-                f"{reviewed_documents}/"
-                f"{total_documents}"
+                f"{reviewed_documents}/{total_documents}"
             ),
             (
                 f"Färdiga volymer: "
-                f"{reviewed_volumes}/"
-                f"{total_volumes}"
+                f"{reviewed_volumes}/{total_volumes}"
+            ),
+            (
+                f"Personnummer från skript: "
+                f"{script_personnummer}/{total_pages}"
+            ),
+            (
+                f"Personnummer korrigerade av människa: "
+                f"{human_personnummer}/{total_pages}"
             ),
         ]
 

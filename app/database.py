@@ -50,10 +50,41 @@ class WorkDatabase:
     def root(self):
         row = self.conn.execute("SELECT source_root FROM project WHERE id=1").fetchone()
         return row[0] if row else ""
+
     def upsert(self, data):
-        self.conn.execute("""INSERT INTO pages(source_pdf,relative_pdf,page_number,page_count,ocr_text,personnummer,script_personnummer,personnummer_source,score,score_reasons)
-        VALUES(:source_pdf,:relative_pdf,:page_number,:page_count,:ocr_text,:personnummer,:script_personnummer,:personnummer_source,:score,:score_reasons)
-        ON CONFLICT(source_pdf,page_number) DO UPDATE SET ocr_text=excluded.ocr_text,score=excluded.score,score_reasons=excluded.score_reasons""", data)
+        self.conn.execute(
+            """
+            INSERT INTO pages (source_pdf,
+                               relative_pdf,
+                               page_number,
+                               page_count,
+                               ocr_text,
+                               personnummer,
+                               script_personnummer,
+                               personnummer_source,
+                               score,
+                               score_reasons)
+            VALUES (:source_pdf,
+                    :relative_pdf,
+                    :page_number,
+                    :page_count,
+                    :ocr_text,
+                    :personnummer,
+                    :script_personnummer,
+                    :personnummer_source,
+                    :score,
+                    :score_reasons) ON CONFLICT(
+                source_pdf,
+                page_number
+            )
+            DO
+            UPDATE SET
+                ocr_text = excluded.ocr_text,
+                score = excluded.score,
+                score_reasons = excluded.score_reasons
+            """,
+            data
+        )
 
     def save_current_position(self, page_id):
         """
