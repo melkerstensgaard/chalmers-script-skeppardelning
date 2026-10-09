@@ -43,6 +43,37 @@ class WorkDatabase:
                 self.conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT DEFAULT ''")
         self.conn.execute("UPDATE pages SET script_personnummer=personnummer WHERE script_personnummer='' AND personnummer<>''")
 
+    def update_validation_result(
+            self,
+            page_id,
+            personnummer,
+            score,
+            score_reasons,
+    ):
+        """
+        Sparar ett manuellt korrigerat personnummer och resultatet
+        från register- och namnkontrollen.
+        """
+
+        self.conn.execute(
+            """
+            UPDATE pages
+            SET personnummer        = ?,
+                personnummer_source = 'människa',
+                score               = ?,
+                score_reasons       = ?,
+                reviewed            = 1
+            WHERE id = ?
+            """,
+            (
+                personnummer,
+                score,
+                score_reasons,
+                page_id,
+            ),
+        )
+
+        self.conn.commit()
     def close(self): self.conn.close()
     def set_root(self, root):
         self.conn.execute("INSERT INTO project VALUES(1,?) ON CONFLICT(id) DO UPDATE SET source_root=excluded.source_root", (str(root),))

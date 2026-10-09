@@ -11,7 +11,13 @@ from .database import WorkDatabase
 from .importer import import_folder
 from .exporter import export_project
 from .structure import structure_parts
-from .register_matcher import load_register
+from .register_matcher import (
+    load_register,
+    normalize_personnummer,
+    find_best_register_record,
+)
+
+from .multi_pass_ocr import valid_luhn
 
 class ReviewApp:
     def __init__(self):
@@ -555,21 +561,47 @@ class ReviewApp:
             pady=(12, 0)
         )
 
-        self.pnr_entry = ttk.Entry(
-            info,
-            textvariable=self.pnr_var
+        personnummer_frame = ttk.Frame(
+            info
         )
 
-        self.pnr_entry.grid(
+        personnummer_frame.grid(
             row=5,
             column=0,
             columnspan=2,
             sticky="ew"
         )
 
+        personnummer_frame.columnconfigure(
+            0,
+            weight=1
+        )
+
+        self.pnr_entry = ttk.Entry(
+            personnummer_frame,
+            textvariable=self.pnr_var
+        )
+
+        self.pnr_entry.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 6)
+        )
+
         self.pnr_entry.bind(
             "<FocusOut>",
             lambda event: self.save()
+        )
+
+        ttk.Button(
+            personnummer_frame,
+            text="Sök efter korrigerat personnummer",
+            command=self.search_corrected_personnummer
+        ).grid(
+            row=0,
+            column=1,
+            sticky="e"
         )
 
         self.score_label = ttk.Label(
@@ -1690,6 +1722,309 @@ class ReviewApp:
                     ["!pressed"]
                 )
 
+    def search_corrected_personnummer(self):
+        """
+        Söker efter det personnummer som användaren har skrivit
+        i personnummerfältet.
+
+        Om personnumret finns i registret jämförs tillhörande
+        förnamn och efternamn med den aktuella sidans OCR-text.
+        Resultatet sparas i arbetsdatabasen.
+        """
+
+        if not self.db:
+            messagebox.showwarning(
+                "Ingen arbetsdatabas",
+                "Öppna en arbetsdatabas först."
+            )
+            return
+
+        if not self.rows:
+            messagebox.showwarning(
+                "Ingen sida vald",
+                "Det finns ingen aktuell sida att kontrollera."
+            )
+            return
+
+        if not self.register_by_personnummer:
+            messagebox.showwarning(
+                "Inget register inläst",
+                (
+                    "Det finns inget inläst personnummerregister. "
+                    "Öppna arbetsdatabasen tillsammans med ett register."
+                )
+            )
+            return
+
+        entered_personnummer = self.pnr_var.get()
+
+        normalized_personnummer = normalize_personnummer(
+            entered_personnummer
+        )
+
+        if not normalized_personnummer:
+            messagebox.showwarning(
+                "Ogiltigt personnummer",
+                (
+                    "Det inskrivna värdet kunde inte tolkas som ett "
+                    "personnummer.\n\n"
+                    "Använd exempelvis formatet 620505-5137."
+                )
+            )
+            return
+
+        # Uppdatera personnummerfältet med normaliserat format.
+        self.pnr_var.set(
+            normalized_personnummer
+        )
+
+        current_row = self.rows[
+            self.index
+        ]
+
+        ocr_text = str(
+            current_row["ocr_text"] or ""
+        )
+
+        score = 0
+        reasons = [
+            (
+                f"Manuellt korrigerat personnummer: "
+                f"{normalized_personnummer}"
+            )
+        ]
+
+        # Kontrollera svensk kontrollsiffra.
+        checksum_valid = valid_luhn(
+            normalized_personnummer
+        )
+
+        if checksum_valid:
+            score += 10
+
+            reasons.append(
+                "Personnumrets kontrollsiffra är giltig: +10 poäng"
+            )
+        else:
+            score -= 10
+
+            reasons.append(
+                "Personnumrets kontrollsiffra är inte giltig: -10 poäng"
+            )
+
+        matching_records = self.register_by_personnummer.get(
+            normalized_personnummer,
+            []
+        )
+
+        if not matching_records:
+            score -= 20
+
+            reasons.append(
+                "Det korrigerade personnumret hittades inte i registret: "
+                "-20 poäng"
+            )
+
+            score = max(
+                0,
+                min(
+                    100,
+                    score
+                )
+            )
+
+            self.save_corrected_validation_result(
+                personnummer=normalized_personnummer,
+                score=score,
+                reasons=reasons,
+            )
+
+            messagebox.showwarning(
+                "Ingen registerträff",
+                (
+                    f"Personnumret {normalized_personnummer} "
+                    "hittades inte i registret.\n\n"
+                    "Kontrollera personnumret en gång till."
+                )
+            )
+
+            return
+
+        score += 60
+
+        reasons.append(
+            "Det korrigerade personnumret hittades i registret: "
+            "+60 poäng"
+        )
+
+        best_record, name_match = find_best_register_record(
+            matching_records,
+            ocr_text,
+        )
+
+        if best_record is not None and name_match is not None:
+            score += name_match.points
+
+            reasons.extend(
+                name_match.reasons
+            )
+
+            reasons.append(
+                (
+                    f"Vald registerpost: "
+                    f"{best_record.fornamn} "
+                    f"{best_record.efternamn}"
+                )
+            )
+
+            register_name = (
+                f"{best_record.fornamn} "
+                f"{best_record.efternamn}"
+            ).strip()
+
+            fornamn_percent = round(
+                name_match.fornamn_similarity * 100
+            )
+
+            efternamn_percent = round(
+                name_match.efternamn_similarity * 100
+            )
+
+        else:
+            register_name = "Namnet kunde inte läsas från registret"
+            fornamn_percent = 0
+            efternamn_percent = 0
+
+            reasons.append(
+                "Ingen namnpost kunde jämföras med OCR-resultatet"
+            )
+
+        score = max(
+            0,
+            min(
+                100,
+                score
+            )
+        )
+
+        self.save_corrected_validation_result(
+            personnummer=normalized_personnummer,
+            score=score,
+            reasons=reasons,
+        )
+
+        messagebox.showinfo(
+            "Registerkontroll klar",
+            (
+                f"Personnummer: {normalized_personnummer}\n"
+                f"Registerpost: {register_name}\n\n"
+                f"Förnamnsmatchning: {fornamn_percent} %\n"
+                f"Efternamnsmatchning: {efternamn_percent} %\n\n"
+                f"Ny poäng: {score}/100"
+            )
+        )
+
+    def save_corrected_validation_result(
+            self,
+            personnummer,
+            score,
+            reasons,
+    ):
+        """
+        Sparar resultatet från kontrollen av ett manuellt
+        korrigerat personnummer.
+        """
+
+        if not self.rows:
+            return
+
+        current_page_id = self.rows[
+            self.index
+        ]["id"]
+
+        score_reasons_json = json.dumps(
+            reasons,
+            ensure_ascii=False,
+        )
+
+        self.db.update_validation_result(
+            page_id=current_page_id,
+            personnummer=personnummer,
+            score=score,
+            score_reasons=score_reasons_json,
+        )
+
+        self.db.save_current_position(
+            current_page_id
+        )
+
+        # Hämta den uppdaterade databasen.
+        self.all_rows = list(
+            self.db.pages()
+        )
+
+        # Återskapa aktuellt filter utan att byta sida i onödan.
+        self.apply_view_filter_without_show(
+            preserve_page_id=current_page_id
+        )
+
+        if self.rows:
+            matching_index = None
+
+            for row_index, row in enumerate(
+                    self.rows
+            ):
+                if row["id"] == current_page_id:
+                    matching_index = row_index
+                    break
+
+            if matching_index is not None:
+                self.index = matching_index
+                self.show()
+            else:
+                # Sidan kan ha försvunnit ur filtret
+                # "Sidor utan personnummer".
+                self.index = min(
+                    self.index,
+                    len(self.rows) - 1
+                )
+
+                self.show()
+
+        else:
+            self.title_var.set(
+                "Inga sidor motsvarar det valda filtret"
+            )
+
+            self.class_var.set("")
+            self.pnr_var.set("")
+
+            self.score_label.config(
+                text="Poäng: –"
+            )
+
+            self.reasons.delete(
+                0,
+                "end"
+            )
+
+            self.ocr.delete(
+                "1.0",
+                "end"
+            )
+
+            self.canvas.delete(
+                "all"
+            )
+
+            self.clear_progress()
+
+        self.status.set(
+            (
+                f"Personnummer {personnummer} kontrollerades "
+                f"mot registret."
+            )
+        )
     def save(self):
         if not self.db:
             return
