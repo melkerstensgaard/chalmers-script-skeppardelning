@@ -16,16 +16,27 @@ from .register_matcher import load_register
 class ReviewApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Sjöfartsbevis v0.4.3")
+        self.root.title("Sjöfartsbevisbearbetare v0.5")
         self.root.geometry("1600x950")
         self.root.minsize(1200, 720)
 
         self.db = None
         self.register_path = None
         self.register_by_personnummer = None
+        # Samtliga sidor från arbetsdatabasen.
+        self.all_rows = []
+
+        # De sidor som för tillfället visas i gränssnittet.
+        # Vid normal visning innehåller listan alla sidor.
+        # Vid filtrering innehåller den endast matchande sidor.
         self.rows = []
+
         self.index = 0
         self.photo = None
+
+        # Aktuellt visningsläge:
+        # "alla", "osakra" eller "utan_personnummer".
+        self.view_mode = "alla"
 
         self.class_var = tk.StringVar()
         self.pnr_var = tk.StringVar()
@@ -37,7 +48,9 @@ class ReviewApp:
         self.status = tk.StringVar(
             value="Redo"
         )
-
+        self.view_status = tk.StringVar(
+            value="Visning: Alla sidor"
+        )
         # Aktuell position i materialet.
         self.position_progress = [
             tk.DoubleVar()
@@ -128,6 +141,10 @@ class ReviewApp:
                 "Exportera resultat",
                 self.do_export
             ),
+            (
+                "Navigera",
+                self.open_navigation_dialog
+            ),
         ]
 
         for text, command in toolbar_buttons:
@@ -140,6 +157,14 @@ class ReviewApp:
                 padx=(0, 6)
             )
 
+        ttk.Label(
+            toolbar,
+            textvariable=self.view_status,
+            foreground="#005a9e"
+        ).pack(
+            side="left",
+            padx=(12, 0)
+        )
         ttk.Label(
             toolbar,
             text=(
@@ -926,8 +951,19 @@ class ReviewApp:
 
         self.db = WorkDatabase(path)
 
-        self.rows = list(
+        self.all_rows = list(
             self.db.pages()
+        )
+
+        self.rows = list(
+            self.all_rows
+        )
+
+        self.view_mode = "alla"
+
+        self.view_status.set(
+            f"Visning: Alla sidor "
+            f"({len(self.rows)})"
         )
 
         self.index = 0
@@ -1076,26 +1112,126 @@ class ReviewApp:
                 "\n".join(errors[:20])
             )
 
-    def refresh(self):
+    def refresh(self, preserve_page_id=None):
+        """
+        Läser om samtliga databasposter och återskapar
+        det aktiva visningsläget.
+
+        preserve_page_id används för att försöka behålla
+        den sida som användaren befinner sig på.
+        """
+
+        if preserve_page_id is None and self.rows:
+            preserve_page_id = self.rows[self.index]["id"]
+
         if self.db:
-            self.rows = list(
+            self.all_rows = list(
                 self.db.pages()
             )
         else:
-            self.rows = []
+            self.all_rows = []
+
+        self.apply_view_filter(
+            preserve_page_id=preserve_page_id
+        )
+
+    def apply_view_filter(
+            self,
+            preserve_page_id=None,
+    ):
+        """
+        Skapar self.rows utifrån aktuellt visningsläge.
+
+        Lägen:
+        alla:
+            Visar samtliga sidor.
+
+        osakra:
+            Visar sidor med poäng under 100.
+
+        utan_personnummer:
+            Visar sidor där inget personnummer finns.
+        """
+
+        if self.view_mode == "osakra":
+            self.rows = [
+                row
+                for row in self.all_rows
+                if float(row["score"] or 0) < 100
+            ]
+
+            self.view_status.set(
+                f"Visning: Osäkra sidor "
+                f"({len(self.rows)})"
+            )
+
+        elif self.view_mode == "utan_personnummer":
+            self.rows = [
+                row
+                for row in self.all_rows
+                if not str(
+                    row["personnummer"] or ""
+                ).strip()
+            ]
+
+            self.view_status.set(
+                f"Visning: Sidor utan personnummer "
+                f"({len(self.rows)})"
+            )
+
+        else:
+            self.view_mode = "alla"
+            self.rows = list(
+                self.all_rows
+            )
+
+            self.view_status.set(
+                f"Visning: Alla sidor "
+                f"({len(self.rows)})"
+            )
 
         if not self.rows:
             self.index = 0
-            self.show()
+
+            self.title_var.set(
+                "Inga sidor motsvarar det valda filtret"
+            )
+
+            self.class_var.set("")
+            self.pnr_var.set("")
+
+            self.score_label.config(
+                text="Poäng: –"
+            )
+
+            self.reasons.delete(
+                0,
+                "end"
+            )
+
+            self.ocr.delete(
+                "1.0",
+                "end"
+            )
+
+            self.canvas.delete(
+                "all"
+            )
+
+            self.clear_progress()
             return
 
-        self.index = min(
-            self.index,
-            len(self.rows) - 1
-        )
+        self.index = 0
+
+        if preserve_page_id is not None:
+            for row_index, row in enumerate(
+                    self.rows
+            ):
+                if row["id"] == preserve_page_id:
+                    self.index = row_index
+                    break
 
         self.show()
-
     def show(self):
         if not self.rows:
             self.title_var.set(
@@ -1210,31 +1346,26 @@ class ReviewApp:
         ]
 
         for index in range(3):
-            self.position_progress[
-                index
-            ].set(0)
-
-            self.position_progress_text[
-                index
-            ].set(
+            self.position_progress[index].set(0)
+            self.position_progress_text[index].set(
                 position_labels[index]
             )
 
-            self.review_progress[
-                index
-            ].set(0)
-
-            self.review_progress_text[
-                index
-            ].set(
+        for index in range(5):
+            self.review_progress[index].set(0)
+            self.review_progress_text[index].set(
                 review_labels[index]
             )
-
     def update_progress(self):
+
         if not self.rows:
             self.clear_progress()
             return
-
+        all_progress_rows = (
+            self.all_rows
+            if self.all_rows
+            else self.rows
+        )
         current_row = self.rows[
             self.index
         ]
@@ -1251,7 +1382,7 @@ class ReviewApp:
 
         documents = {}
 
-        for row in self.rows:
+        for row in all_progress_rows:
             relative_pdf = row[
                 "relative_pdf"
             ]
@@ -1406,22 +1537,22 @@ class ReviewApp:
         # -------------------------------------------------
         script_personnummer = sum(
             1
-            for row in self.rows
+            for row in all_progress_rows
             if row["personnummer_source"] == "skript"
         )
 
         human_personnummer = sum(
             1
-            for row in self.rows
+            for row in all_progress_rows
             if row["personnummer_source"] == "människa"
         )
         total_pages = len(
-            self.rows
+            all_progress_rows
         )
 
         reviewed_pages = sum(
             1
-            for row in self.rows
+            for row in all_progress_rows
             if bool(row["reviewed"])
         )
 
@@ -1566,24 +1697,76 @@ class ReviewApp:
         if not self.rows:
             return
 
-        current_row = self.rows[
+        current_page_id = self.rows[
             self.index
-        ]
+        ]["id"]
+
+        current_index = self.index
 
         self.db.save(
-            current_row["id"],
+            current_page_id,
             self.class_var.get(),
             self.pnr_var.get()
         )
 
-        self.rows = list(
+        self.db.save_current_position(
+            current_page_id
+        )
+
+        self.all_rows = list(
             self.db.pages()
         )
 
-        # Spara även exakt var användaren arbetar.
-        self.db.save_current_position(
-            self.rows[self.index]["id"]
+        self.apply_view_filter_without_show(
+            preserve_page_id=current_page_id
         )
+
+        page_still_visible = any(
+            row["id"] == current_page_id
+            for row in self.rows
+        )
+
+        if not page_still_visible and self.rows:
+            self.index = min(
+                current_index,
+                len(self.rows) - 1
+            )
+
+            self.show()
+            return
+
+        if not self.rows:
+            self.title_var.set(
+                "Inga sidor motsvarar det valda filtret"
+            )
+
+            self.class_var.set("")
+            self.pnr_var.set("")
+
+            self.score_label.config(
+                text="Poäng: –"
+            )
+
+            self.reasons.delete(
+                0,
+                "end"
+            )
+
+            self.ocr.delete(
+                "1.0",
+                "end"
+            )
+
+            self.canvas.delete(
+                "all"
+            )
+
+            self.clear_progress()
+
+            self.status.set(
+                "Det finns inga fler sidor i den valda visningen."
+            )
+            return
 
         self.update_progress()
 
@@ -1591,9 +1774,87 @@ class ReviewApp:
             "Ändringarna har sparats."
         )
 
+    def apply_view_filter_without_show(
+            self,
+            preserve_page_id=None,
+    ):
+        """
+        Samma filtrering som apply_view_filter, men utan
+        att återge PDF-sidan på nytt.
+
+        Används efter sparning så att gränssnittet inte
+        blinkar eller återrenderar PDF-filen i onödan.
+        """
+
+        if self.view_mode == "osakra":
+            self.rows = [
+                row
+                for row in self.all_rows
+                if float(row["score"] or 0) < 100
+            ]
+
+            self.view_status.set(
+                f"Visning: Osäkra sidor "
+                f"({len(self.rows)})"
+            )
+
+        elif self.view_mode == "utan_personnummer":
+            self.rows = [
+                row
+                for row in self.all_rows
+                if not str(
+                    row["personnummer"] or ""
+                ).strip()
+            ]
+
+            self.view_status.set(
+                f"Visning: Sidor utan personnummer "
+                f"({len(self.rows)})"
+            )
+
+
+        else:
+
+            self.view_mode = "alla"
+
+            self.rows = list(
+
+                self.all_rows
+
+            )
+
+            self.view_status.set(
+
+                f"Visning: Alla sidor "
+
+                f"({len(self.rows)})"
+
+            )
+
+        if not self.rows:
+            self.index = 0
+            return
+
+        self.index = min(
+            self.index,
+            len(self.rows) - 1
+        )
+
+        if preserve_page_id is not None:
+            for row_index, row in enumerate(
+                    self.rows
+            ):
+                if row["id"] == preserve_page_id:
+                    self.index = row_index
+                    break
+
     def set_class(self, value):
         if not self.rows:
             return
+
+        current_page_id = self.rows[
+            self.index
+        ]["id"]
 
         self.class_var.set(
             value
@@ -1601,10 +1862,21 @@ class ReviewApp:
 
         self.update_class_buttons()
         self.save()
-        self.move(
-            1,
-            save=False
+
+        if not self.rows:
+            return
+
+        current_page_still_visible = any(
+            row["id"] == current_page_id
+            for row in self.rows
         )
+
+        if current_page_still_visible:
+            self.move(
+                1,
+                save=False
+            )
+
 
     def move(
         self,
@@ -1803,6 +2075,473 @@ class ReviewApp:
             gain=1
         )
 
+    def get_navigation_structure(self):
+        """
+        Bygger en struktur med volymer och dokument.
+
+        Resultat:
+
+        {
+            "Volym 1": {
+                "fil1.pdf": första_sidans_id,
+                "fil2.pdf": första_sidans_id,
+            }
+        }
+        """
+
+        navigation_structure = {}
+
+        for row in self.all_rows:
+            series, volume = structure_parts(
+                row["relative_pdf"]
+            )
+
+            if not volume:
+                volume = "Okänd volym"
+
+            document_name = row[
+                "relative_pdf"
+            ]
+
+            volume_documents = (
+                navigation_structure.setdefault(
+                    volume,
+                    {}
+                )
+            )
+
+            if document_name not in volume_documents:
+                volume_documents[
+                    document_name
+                ] = row["id"]
+
+        return navigation_structure
+
+    def go_to_page_id(self, page_id):
+        """
+        Avslutar eventuell filtrering och går direkt
+        till en sida i den fullständiga listan.
+        """
+
+        self.view_mode = "alla"
+
+        self.rows = list(
+            self.all_rows
+        )
+
+        for row_index, row in enumerate(
+                self.rows
+        ):
+            if row["id"] == page_id:
+                self.index = row_index
+                self.view_status.set(
+                    f"Visning: Alla sidor "
+                    f"({len(self.rows)})"
+                )
+                self.show()
+                return
+
+        messagebox.showwarning(
+            "Sidan hittades inte",
+            "Den valda sidan kunde inte hittas."
+        )
+
+    def open_navigation_dialog(self):
+        if not self.db or not self.all_rows:
+            messagebox.showwarning(
+                "Inget material",
+                (
+                    "Öppna en arbetsdatabas med inläst "
+                    "material innan du navigerar."
+                ),
+            )
+            return
+
+        navigation_structure = self.get_navigation_structure()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Navigera")
+        dialog.geometry("720x540")
+        dialog.minsize(620, 450)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        dialog.columnconfigure(
+            0,
+            weight=1,
+        )
+
+        dialog.rowconfigure(
+            2,
+            weight=1,
+        )
+
+        # -------------------------------------------------
+        # Visningsalternativ
+        # -------------------------------------------------
+
+        filters_frame = ttk.LabelFrame(
+            dialog,
+            text="Visningsalternativ",
+            padding=10,
+        )
+
+        filters_frame.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=10,
+            pady=(10, 5),
+        )
+
+        for column in range(3):
+            filters_frame.columnconfigure(
+                column,
+                weight=1,
+            )
+
+        ttk.Button(
+            filters_frame,
+            text="Visa alla sidor",
+            command=lambda: self.activate_view_mode(
+                "alla",
+                dialog,
+            ),
+        ).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+        )
+
+        ttk.Button(
+            filters_frame,
+            text="Visa osäkra sidor",
+            command=lambda: self.activate_view_mode(
+                "osakra",
+                dialog,
+            ),
+        ).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=4,
+        )
+
+        ttk.Button(
+            filters_frame,
+            text="Visa sidor utan personnummer",
+            command=lambda: self.activate_view_mode(
+                "utan_personnummer",
+                dialog,
+            ),
+        ).grid(
+            row=0,
+            column=2,
+            sticky="ew",
+            padx=(4, 0),
+        )
+
+        # -------------------------------------------------
+        # Volymval
+        # -------------------------------------------------
+
+        selection_frame = ttk.Frame(
+            dialog,
+            padding=(10, 5),
+        )
+
+        selection_frame.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+        )
+
+        selection_frame.columnconfigure(
+            1,
+            weight=1,
+        )
+
+        ttk.Label(
+            selection_frame,
+            text="Volym:",
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+        )
+
+        volume_var = tk.StringVar()
+
+        volume_box = ttk.Combobox(
+            selection_frame,
+            textvariable=volume_var,
+            state="readonly",
+            values=sorted(
+                navigation_structure.keys()
+            ),
+        )
+
+        volume_box.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+        )
+
+        # -------------------------------------------------
+        # Dokumentlista
+        # -------------------------------------------------
+
+        documents_frame = ttk.LabelFrame(
+            dialog,
+            text="Dokument i vald volym",
+            padding=8,
+        )
+
+        documents_frame.grid(
+            row=2,
+            column=0,
+            sticky="nsew",
+            padx=10,
+            pady=5,
+        )
+
+        documents_frame.columnconfigure(
+            0,
+            weight=1,
+        )
+
+        documents_frame.rowconfigure(
+            0,
+            weight=1,
+        )
+
+        document_list = tk.Listbox(
+            documents_frame,
+            exportselection=False,
+        )
+
+        document_scrollbar = ttk.Scrollbar(
+            documents_frame,
+            orient="vertical",
+            command=document_list.yview,
+        )
+
+        document_list.configure(
+            yscrollcommand=document_scrollbar.set,
+        )
+
+        document_list.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+        )
+
+        document_scrollbar.grid(
+            row=0,
+            column=1,
+            sticky="ns",
+        )
+
+        # Listan innehåller de relativa PDF-sökvägar som
+        # motsvarar posterna som visas i Listbox.
+        displayed_documents = []
+
+        def update_document_list(event=None):
+            selected_volume = volume_var.get()
+
+            document_list.delete(
+                0,
+                "end",
+            )
+
+            displayed_documents.clear()
+
+            if not selected_volume:
+                return
+
+            documents = navigation_structure.get(
+                selected_volume,
+                {},
+            )
+
+            for relative_pdf in sorted(
+                    documents.keys()
+            ):
+                displayed_documents.append(
+                    relative_pdf
+                )
+
+                document_list.insert(
+                    "end",
+                    relative_pdf,
+                )
+
+            if displayed_documents:
+                document_list.selection_set(0)
+                document_list.activate(0)
+                document_list.see(0)
+
+        def go_to_selected_document():
+            selected_volume = volume_var.get()
+            selection = document_list.curselection()
+
+            if not selected_volume:
+                messagebox.showwarning(
+                    "Ingen volym vald",
+                    "Välj först en volym.",
+                    parent=dialog,
+                )
+                return
+
+            if not selection:
+                messagebox.showwarning(
+                    "Inget dokument valt",
+                    "Välj ett dokument i listan.",
+                    parent=dialog,
+                )
+                return
+
+            document_position = selection[0]
+
+            relative_pdf = displayed_documents[
+                document_position
+            ]
+
+            page_id = navigation_structure[
+                selected_volume
+            ][relative_pdf]
+
+            dialog.destroy()
+
+            self.go_to_page_id(
+                page_id
+            )
+
+        volume_box.bind(
+            "<<ComboboxSelected>>",
+            update_document_list,
+        )
+
+        document_list.bind(
+            "<Double-Button-1>",
+            lambda event: go_to_selected_document(),
+        )
+
+        document_list.bind(
+            "<Return>",
+            lambda event: go_to_selected_document(),
+        )
+
+        # -------------------------------------------------
+        # Dialogknappar
+        # -------------------------------------------------
+
+        buttons_frame = ttk.Frame(
+            dialog,
+            padding=10,
+        )
+
+        buttons_frame.grid(
+            row=3,
+            column=0,
+            sticky="ew",
+        )
+
+        ttk.Button(
+            buttons_frame,
+            text="Gå till dokument",
+            command=go_to_selected_document,
+        ).pack(
+            side="right",
+            padx=(5, 0),
+        )
+
+        ttk.Button(
+            buttons_frame,
+            text="Stäng",
+            command=dialog.destroy,
+        ).pack(
+            side="right",
+        )
+
+        volumes = sorted(
+            navigation_structure.keys()
+        )
+
+        if volumes:
+            volume_var.set(
+                volumes[0]
+            )
+
+            update_document_list()
+
+            volume_box.focus_set()
+
+    def activate_view_mode(
+            self,
+            view_mode,
+            dialog=None,
+    ):
+        """
+        Aktiverar ett visningsläge och går till den första
+        sidan som motsvarar filtret.
+        """
+
+        current_page_id = None
+
+        if self.rows:
+            current_page_id = self.rows[
+                self.index
+            ]["id"]
+
+        self.view_mode = view_mode
+
+        if dialog is not None:
+            dialog.destroy()
+
+        self.apply_view_filter(
+            preserve_page_id=current_page_id
+        )
+
+        if not self.rows:
+            if view_mode == "osakra":
+                messagebox.showinfo(
+                    "Inga osäkra sidor",
+                    (
+                        "Det finns inga sidor med "
+                        "poäng under 100."
+                    ),
+                )
+
+            elif view_mode == "utan_personnummer":
+                messagebox.showinfo(
+                    "Inga sidor utan personnummer",
+                    (
+                        "Alla sidor har ett registrerat "
+                        "personnummer."
+                    ),
+                )
+
+            return
+
+        if view_mode == "osakra":
+            self.status.set(
+                f"Visar {len(self.rows)} osäkra sidor."
+            )
+
+        elif view_mode == "utan_personnummer":
+            self.status.set(
+                f"Visar {len(self.rows)} sidor "
+                f"utan personnummer."
+            )
+
+        else:
+            self.status.set(
+                f"Visar samtliga "
+                f"{len(self.rows)} sidor."
+            )
     def do_export(self):
         if not self.db:
             messagebox.showwarning(
