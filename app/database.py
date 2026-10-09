@@ -37,11 +37,64 @@ class WorkDatabase:
         self.conn.commit()
 
     def _migrate(self):
-        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(pages)")}
-        for name in ("script_personnummer", "personnummer_source"):
-            if name not in columns:
-                self.conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT DEFAULT ''")
-        self.conn.execute("UPDATE pages SET script_personnummer=personnummer WHERE script_personnummer='' AND personnummer<>''")
+        """
+        Uppgraderar äldre arbetsdatabaser utan att ta bort
+        befintliga data eller manuella korrigeringar.
+        """
+
+        columns = {
+            row["name"]
+            for row in self.conn.execute(
+                "PRAGMA table_info(pages)"
+            )
+        }
+
+        if "script_personnummer" not in columns:
+            self.conn.execute(
+                """
+                ALTER TABLE pages
+                    ADD COLUMN script_personnummer TEXT DEFAULT ''
+                """
+            )
+
+        if "personnummer_source" not in columns:
+            self.conn.execute(
+                """
+                ALTER TABLE pages
+                    ADD COLUMN personnummer_source TEXT DEFAULT ''
+                """
+            )
+
+        if "reviewed" not in columns:
+            self.conn.execute(
+                """
+                ALTER TABLE pages
+                    ADD COLUMN reviewed INTEGER DEFAULT 0
+                """
+            )
+
+        # För äldre poster där ett personnummer redan finns men
+        # originalvärdet inte sparats används befintligt värde
+        # som ursprungligt skriptförslag.
+        self.conn.execute(
+            """
+            UPDATE pages
+            SET script_personnummer = personnummer
+            WHERE COALESCE(script_personnummer, '') = ''
+              AND COALESCE(personnummer, '') <> ''
+            """
+        )
+
+        # Äldre poster med personnummer men utan registrerad källa
+        # markeras i första hand som skriptresultat.
+        self.conn.execute(
+            """
+            UPDATE pages
+            SET personnummer_source = 'skript'
+            WHERE COALESCE(personnummer_source, '') = ''
+              AND COALESCE(personnummer, '') <> ''
+            """
+        )
 
     def update_validation_result(
             self,
@@ -159,29 +212,107 @@ class WorkDatabase:
 
         return row["current_page_id"]
 
-    def review_statistics(self):
+    def pages(self):
+        return self.conn.execute("SELECT * FROM pages ORDER BY relative_pdf COLLATE NOCASE,page_number").fetchall()
+
+    def save(
+            self,
+            page_id,
+            classification,
+            personnummer
+    ):
         """
-        Returnerar antal granskade och totala sidor.
-        En sida räknas som granskad när reviewed = 1.
+        Sparar användarens granskning av en sida.
+
+        När denna metod anropas betyder det att en människa
+        har hanterat sidan. Sidan markeras därför som granskad
+        och personnummer_source sätts till människa.
+        """
+
+        value = (
+                personnummer or ""
+        ).strip()
+
+        self.conn.execute(
+            """
+            UPDATE pages
+            SET classification      = ?,
+                personnummer        = ?,
+                personnummer_source = 'människa',
+                reviewed            = 1
+            WHERE id = ?
+            """,
+            (
+                classification,
+                value,
+                page_id
+            )
+        )
+
+        self.conn.commit()
+
+
+
+    def get_progress_statistics(self):
+        """
+        Hämtar granskningsstatistik direkt från arbetsdatabasen.
+
+        Själva totalsiffrorna sparas inte separat. De räknas fram
+        från sidornas sparade status varje gång databasen öppnas.
         """
 
         row = self.conn.execute(
             """
-            SELECT COUNT(*)                   AS total_pages,
-                   COALESCE(SUM(reviewed), 0) AS reviewed_pages
+            SELECT COUNT(*) AS total_pages,
+
+                   COALESCE(
+                           SUM(
+                                   CASE
+                                       WHEN reviewed = 1
+                                           THEN 1
+                                       ELSE 0
+                                       END
+                           ),
+                           0
+                   )        AS reviewed_pages,
+
+                   COALESCE(
+                           SUM(
+                                   CASE
+                                       WHEN personnummer_source = 'skript'
+                                           THEN 1
+                                       ELSE 0
+                                       END
+                           ),
+                           0
+                   )        AS script_personnummer,
+
+                   COALESCE(
+                           SUM(
+                                   CASE
+                                       WHEN personnummer_source = 'människa'
+                                           THEN 1
+                                       ELSE 0
+                                       END
+                           ),
+                           0
+                   )        AS human_personnummer
+
             FROM pages
             """
         ).fetchone()
 
         return {
-            "reviewed_pages": row["reviewed_pages"],
-            "total_pages": row["total_pages"],
+            "total_pages": int(
+                row["total_pages"] or 0
+            ),
+            "reviewed_pages": int(
+                row["reviewed_pages"] or 0
+            ),
+            "script_personnummer": int(
+                row["script_personnummer"] or 0
+            ),
+            "human_personnummer": int(
+                row["human_personnummer"] or 0
+            ),
         }
-    def pages(self):
-        return self.conn.execute("SELECT * FROM pages ORDER BY relative_pdf COLLATE NOCASE,page_number").fetchall()
-    def save(self, page_id, classification, personnummer):
-        row = self.conn.execute("SELECT script_personnummer FROM pages WHERE id=?", (page_id,)).fetchone()
-        value = personnummer.strip()
-        source = "" if not value else ("skript" if value == (row[0] or "") else "människa")
-        self.conn.execute("UPDATE pages SET classification=?,personnummer=?,personnummer_source=?,reviewed=1 WHERE id=?", (classification,value,source,page_id))
-        self.conn.commit()

@@ -26,34 +26,42 @@ class NameMatchResult:
 
 def normalize_personnummer(value) -> str:
     """
-    Normaliserar personnummer till YYMMDD-NNNN.
+    Normaliserar kompletta personnummer till YYMMDD-XXXX.
 
-    Exempel:
-    6501011234   -> 650101-1234
-    196501011234 -> 650101-1234
-    650101-1234  -> 650101-1234
+    Accepterar exempelvis:
+    6205055137
+    620505-5137
+    62-05-05-5137
+    196205055137
+    1962-05-05-5137
     """
 
     if value is None:
         return ""
 
+    text = str(value).strip()
+
+    # Excel kan ge numeriska celler som float.
     if isinstance(value, float) and value.is_integer():
-        value = int(value)
+        text = str(int(value))
 
     digits = re.sub(
         r"\D",
         "",
-        str(value),
+        text,
     )
 
+    # YYYYMMDDXXXX
     if len(digits) == 12:
         digits = digits[2:]
 
     if len(digits) != 10:
         return ""
 
-    return f"{digits[:6]}-{digits[6:]}"
-
+    return (
+        f"{digits[:6]}-"
+        f"{digits[6:]}"
+    )
 
 def normalize_name(value) -> str:
     """
@@ -409,7 +417,7 @@ def evaluate_register_record(
     else:
         points -= 10
         reasons.append(
-            f'Förnamnet "{record.fornamn}" hittades inte: '
+            f'Förnamnet "{record.fornamn}" hittades inte i OCR resultatet: '
             "-10 poäng"
         )
 
@@ -430,7 +438,7 @@ def evaluate_register_record(
     else:
         points -= 15
         reasons.append(
-            f'Efternamnet "{record.efternamn}" hittades inte: '
+            f'Efternamnet "{record.efternamn}" hittades inte i OCR resultatet: '
             "-15 poäng"
         )
 

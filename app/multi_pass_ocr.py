@@ -9,9 +9,45 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from .register_matcher import find_best_register_record
 
 
-PERSONNUMMER_PATTERN = re.compile(
-    r"(?<!\d)((?:18|19|20)?\d{6})[-+ ]?(\d{4})(?!\d)"
-)
+PERSONNUMMER_PATTERNS = [
+    # YYMMDD-XXXX / YYMMDD XXXX / YYMMDDXXXX
+    re.compile(
+        r"(?<!\d)"
+        r"(\d{6})"
+        r"[-+ ]?"
+        r"(\d{4})"
+        r"(?!\d)"
+    ),
+
+    # YY-MM-DD-XXXX
+    re.compile(
+        r"(?<!\d)"
+        r"(\d{2})[- /.]"
+        r"(\d{2})[- /.]"
+        r"(\d{2})[-+ /.]"
+        r"(\d{4})"
+        r"(?!\d)"
+    ),
+
+    # YYYYMMDD-XXXX / YYYYMMDDXXXX
+    re.compile(
+        r"(?<!\d)"
+        r"((?:18|19|20)\d{6})"
+        r"[-+ ]?"
+        r"(\d{4})"
+        r"(?!\d)"
+    ),
+
+    # YYYY-MM-DD-XXXX
+    re.compile(
+        r"(?<!\d)"
+        r"((?:18|19|20)\d{2})[- /.]"
+        r"(\d{2})[- /.]"
+        r"(\d{2})[-+ /.]"
+        r"(\d{4})"
+        r"(?!\d)"
+    ),
+]
 
 
 @dataclass
@@ -45,17 +81,34 @@ def normalize_personnummer(date_part: str, suffix: str) -> str:
     return f"{digits[:6]}-{digits[6:]}"
 
 
-def extract_personnummer_candidates(text: str) -> list[str]:
+def extract_personnummer_candidates(text):
     candidates = set()
 
-    for match in PERSONNUMMER_PATTERN.finditer(text or ""):
-        normalized = normalize_personnummer(
-            match.group(1),
-            match.group(2),
-        )
+    if not text:
+        return []
 
-        if normalized:
-            candidates.add(normalized)
+    for pattern_index, pattern in enumerate(
+        PERSONNUMMER_PATTERNS
+    ):
+        for match in pattern.finditer(text):
+            if pattern_index in (0, 2):
+                date_part = match.group(1)
+                suffix = match.group(2)
+            else:
+                date_part = "".join(
+                    match.group(group_index)
+                    for group_index in (1, 2, 3)
+                )
+
+                suffix = match.group(4)
+
+            normalized = normalize_personnummer(
+                date_part,
+                suffix,
+            )
+
+            if normalized:
+                candidates.add(normalized)
 
     return sorted(candidates)
 
@@ -393,9 +446,10 @@ def analyze_page_multi_pass(
             )
 
             reasons.append(
-                "Vald registerpost: "
+                "Resultatet visar att beviset tillhör: "
                 f"{best_record.fornamn} "
                 f"{best_record.efternamn}"
+                f" enligt registret"
             )
 
     score = max(

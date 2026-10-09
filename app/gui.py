@@ -46,6 +46,7 @@ class ReviewApp:
 
         self.class_var = tk.StringVar()
         self.pnr_var = tk.StringVar()
+        self.corrected_var = tk.BooleanVar(value=False)
 
         self.title_var = tk.StringVar(
             value="Ingen databas öppnad"
@@ -573,8 +574,18 @@ class ReviewApp:
         )
 
         personnummer_frame.columnconfigure(
-            0,
+            1,
             weight=1
+        )
+        ttk.Checkbutton(
+            personnummer_frame,
+            text="Korrigerad",
+            variable=self.corrected_var,
+            state="disabled"
+        ).grid(
+            row=0,
+            column=0,
+            padx=(0, 8)
         )
 
         self.pnr_entry = ttk.Entry(
@@ -584,14 +595,14 @@ class ReviewApp:
 
         self.pnr_entry.grid(
             row=0,
-            column=0,
+            column=1,
             sticky="ew",
             padx=(0, 6)
         )
 
         self.pnr_entry.bind(
-            "<FocusOut>",
-            lambda event: self.save()
+            "<Return>",
+            lambda event: self.search_corrected_personnummer()
         )
 
         ttk.Button(
@@ -600,7 +611,7 @@ class ReviewApp:
             command=self.search_corrected_personnummer
         ).grid(
             row=0,
-            column=1,
+            column=2,
             sticky="e"
         )
 
@@ -1029,11 +1040,9 @@ class ReviewApp:
                     break
 
         self.show()
+        statistics = self.db.get_progress_statistics()
 
-        if (
-                position_restored
-                and self.rows
-        ):
+        if position_restored and self.rows:
             current_row = self.rows[
                 self.index
             ]
@@ -1042,7 +1051,12 @@ class ReviewApp:
                 "Föregående session återställd: "
                 f'{current_row["relative_pdf"]}, '
                 f'sida {current_row["page_number"]} '
-                f'av {current_row["page_count"]}.'
+                f'av {current_row["page_count"]}. '
+                f'Granskade sidor: '
+                f'{statistics["reviewed_pages"]}/'
+                f'{statistics["total_pages"]}. '
+                f'Personnummer korrigerade av människa: '
+                f'{statistics["human_personnummer"]}.'
             )
 
         elif self.rows:
@@ -1054,12 +1068,18 @@ class ReviewApp:
                 "Arbetsdatabasen öppnades vid "
                 "första ogranskade sidan: "
                 f'{current_row["relative_pdf"]}, '
-                f'sida {current_row["page_number"]}.'
+                f'sida {current_row["page_number"]}. '
+                f'Granskade sidor: '
+                f'{statistics["reviewed_pages"]}/'
+                f'{statistics["total_pages"]}. '
+                f'Personnummer korrigerade av människa: '
+                f'{statistics["human_personnummer"]}.'
             )
 
         else:
             self.status.set(
-                f"Databas öppnad: {path}"
+                f"Databas öppnad: {path}. "
+                f"Databasen innehåller inga importerade sidor."
             )
 
     def load_folder(self):
@@ -1189,8 +1209,14 @@ class ReviewApp:
             self.rows = [
                 row
                 for row in self.all_rows
-                if float(row["score"] or 0) < 100
+                if (
+                        0 < float(row["score"] or 0) < 100
+                        and (
+                                row["personnummer_source"] or ""
+                        ).strip().casefold() != "människa"
+                )
             ]
+
 
             self.view_status.set(
                 f"Visning: Osäkra sidor "
@@ -1313,6 +1339,11 @@ class ReviewApp:
 
         self.pnr_var.set(
             row["personnummer"]
+        )
+        self.corrected_var.set(
+            (
+                    row["personnummer_source"] or ""
+            ).strip().casefold() == "människa"
         )
 
         self.score_label.config(
@@ -1570,13 +1601,17 @@ class ReviewApp:
         script_personnummer = sum(
             1
             for row in all_progress_rows
-            if row["personnummer_source"] == "skript"
+            if (
+                    row["personnummer_source"] or ""
+            ).strip().casefold() == "skript"
         )
 
         human_personnummer = sum(
             1
             for row in all_progress_rows
-            if row["personnummer_source"] == "människa"
+            if (
+                    row["personnummer_source"] or ""
+            ).strip().casefold() == "människa"
         )
         total_pages = len(
             all_progress_rows
@@ -1585,7 +1620,7 @@ class ReviewApp:
         reviewed_pages = sum(
             1
             for row in all_progress_rows
-            if bool(row["reviewed"])
+            if int(row["reviewed"] or 0) == 1
         )
 
         total_documents = len(
@@ -1672,11 +1707,11 @@ class ReviewApp:
                 f"{reviewed_documents}/{total_documents}"
             ),
             (
-                f"Färdiga volymer: "
+                f"Granskade volymer: "
                 f"{reviewed_volumes}/{total_volumes}"
             ),
             (
-                f"Personnummer från skript: "
+                f"Personnummer hämtade av skript: "
                 f"{script_personnummer}/{total_pages}"
             ),
             (
@@ -1803,13 +1838,13 @@ class ReviewApp:
             score += 10
 
             reasons.append(
-                "Personnumrets kontrollsiffra är giltig: +10 poäng"
+                "Personnumrets har rätt format och är giltig: +10 poäng"
             )
         else:
             score -= 10
 
             reasons.append(
-                "Personnumrets kontrollsiffra är inte giltig: -10 poäng"
+                "Personnumrets har fel format: -10 poäng"
             )
 
         matching_records = self.register_by_personnummer.get(
@@ -1871,9 +1906,10 @@ class ReviewApp:
 
             reasons.append(
                 (
-                    f"Vald registerpost: "
+                    f"Resultatet visar att beviset tillhör: "
                     f"{best_record.fornamn} "
                     f"{best_record.efternamn}"
+                    f" enligt registret"
                 )
             )
 
@@ -2125,7 +2161,12 @@ class ReviewApp:
             self.rows = [
                 row
                 for row in self.all_rows
-                if float(row["score"] or 0) < 100
+                if (
+                        0 < float(row["score"] or 0) < 100
+                        and (
+                                row["personnummer_source"] or ""
+                        ).strip().casefold() != "människa"
+                )
             ]
 
             self.view_status.set(
