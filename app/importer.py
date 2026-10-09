@@ -12,6 +12,7 @@ def import_folder(
     db,
     root,
     progress=None,
+    register_by_personnummer=None,
 ):
     root_path = Path(
         root,
@@ -73,6 +74,7 @@ def import_folder(
                         page=page,
                         language="swe+eng",
                         dpi=300,
+                        register_by_personnummer=register_by_personnummer,
                     )
                 )
 

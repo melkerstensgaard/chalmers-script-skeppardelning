@@ -11,7 +11,7 @@ from .database import WorkDatabase
 from .importer import import_folder
 from .exporter import export_project
 from .structure import structure_parts
-
+from .register_matcher import load_register
 
 class ReviewApp:
     def __init__(self):
@@ -21,6 +21,8 @@ class ReviewApp:
         self.root.minsize(1200, 720)
 
         self.db = None
+        self.register_path = None
+        self.register_by_personnummer = None
         self.rows = []
         self.index = 0
         self.photo = None
@@ -810,6 +812,57 @@ class ReviewApp:
 
         return "break"
 
+    def select_register(self):
+        register_path = filedialog.askopenfilename(
+            title="Välj personnummerregister",
+            filetypes=[
+                (
+                    "Excel-arbetsbok",
+                    "*.xlsx",
+                ),
+                (
+                    "Alla filer",
+                    "*.*",
+                ),
+            ],
+        )
+
+        if not register_path:
+            self.register_path = None
+            self.register_by_personnummer = None
+            return False
+
+        try:
+            register_data = load_register(
+                register_path,
+            )
+
+        except Exception as exception:
+            messagebox.showerror(
+                "Registerfel",
+                str(exception),
+            )
+
+            self.register_path = None
+            self.register_by_personnummer = None
+            return False
+
+        self.register_path = register_path
+        self.register_by_personnummer = register_data
+
+        number_of_records = sum(
+            len(records)
+            for records in register_data.values()
+        )
+
+        self.status.set(
+            "Register inläst: "
+            f"{number_of_records} registerrader, "
+            f"{len(register_data)} unika personnummer"
+        )
+
+        return True
+
     def new_db(self):
         path = filedialog.asksaveasfilename(
             title="Skapa arbetsdatabas",
@@ -827,6 +880,16 @@ class ReviewApp:
         )
 
         if path:
+            if not self.select_register():
+                messagebox.showwarning(
+                    "Inget register valt",
+                    (
+                        "Arbetsdatabasen öppnas inte eftersom "
+                        "inget giltigt register valdes."
+                    ),
+                )
+                return
+
             self.connect(path)
 
     def open_db(self):
@@ -845,6 +908,16 @@ class ReviewApp:
         )
 
         if path:
+            if not self.select_register():
+                messagebox.showwarning(
+                    "Inget register valt",
+                    (
+                        "Arbetsdatabasen öppnas inte eftersom "
+                        "inget giltigt register valdes."
+                    ),
+                )
+                return
+
             self.connect(path)
 
     def connect(self, path):
@@ -932,6 +1005,16 @@ class ReviewApp:
             )
             return
 
+        if not self.register_by_personnummer:
+            messagebox.showwarning(
+                "Inget register inläst",
+                (
+                    "Läs in ett personnummerregister innan "
+                    "seriemappen importeras."
+                ),
+            )
+            return
+
         folder = filedialog.askdirectory(
             title="Välj seriemapp"
         )
@@ -960,7 +1043,10 @@ class ReviewApp:
             count, errors = import_folder(
                 self.db,
                 folder,
-                update_import_progress
+                update_import_progress,
+                register_by_personnummer=(
+                    self.register_by_personnummer
+                ),
             )
 
             self.root.after(

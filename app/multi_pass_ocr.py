@@ -6,6 +6,8 @@ import pymupdf
 import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+from .register_matcher import find_best_register_record
+
 
 PERSONNUMMER_PATTERN = re.compile(
     r"(?<!\d)((?:18|19|20)?\d{6})[-+ ]?(\d{4})(?!\d)"
@@ -189,6 +191,7 @@ def analyze_page_multi_pass(
     page,
     language: str = "swe+eng",
     dpi: int = 300,
+    register_by_personnummer=None,
 ) -> MultiPassOCRResult:
     embedded_text = page.get_text("text") or ""
     image = page_to_image(page, dpi=dpi)
@@ -219,6 +222,22 @@ def analyze_page_multi_pass(
             failed_passes.append(
                 f"{pass_name}: {type(exception).__name__}: {exception}"
             )
+    all_ocr_text_parts = []
+
+    if embedded_text.strip():
+        all_ocr_text_parts.append(
+            embedded_text,
+        )
+
+    for pass_result in pass_results:
+        if pass_result.text.strip():
+            all_ocr_text_parts.append(
+                pass_result.text,
+            )
+
+    combined_ocr_text = "\n".join(
+        all_ocr_text_parts,
+    )
 
     candidate_votes = Counter()
 
@@ -260,26 +279,79 @@ def analyze_page_multi_pass(
             candidates={},
         )
 
-    def candidate_sort_key(item: tuple[str, int]) -> tuple[int, bool, str]:
+    def candidate_sort_key(
+            item: tuple[str, int],
+    ):
         personnummer_candidate, votes = item
-        return votes, valid_luhn(personnummer_candidate), personnummer_candidate
+
+        exists_in_register = (
+                register_by_personnummer is not None
+                and personnummer_candidate
+                in register_by_personnummer
+        )
+
+        candidate_points = votes * 10
+
+        if valid_luhn(personnummer_candidate):
+            candidate_points += 10
+
+        if exists_in_register:
+            candidate_points += 60
+        else:
+            candidate_points -= 20
+
+        return (
+            candidate_points,
+            votes,
+            valid_luhn(personnummer_candidate),
+            personnummer_candidate,
+        )
 
     selected_candidate, vote_count = max(
         candidate_votes.items(),
         key=candidate_sort_key,
     )
 
-    checksum_valid = valid_luhn(selected_candidate)
-    vote_ratio = vote_count / max(1, total_sources)
-    score = round(vote_ratio * 75)
+    checksum_valid = valid_luhn(
+        selected_candidate,
+    )
+
+    vote_ratio = (
+            vote_count
+            / max(
+        1,
+        total_sources,
+    )
+    )
+
+    score = round(
+        vote_ratio * 40,
+    )
 
     if checksum_valid:
-        score += 20
+        score += 10
 
     if vote_count >= 3:
         score += 5
 
-    score = min(100, score)
+    matching_register_records = []
+
+    if register_by_personnummer is not None:
+        matching_register_records = (
+            register_by_personnummer.get(
+                selected_candidate,
+                [],
+            )
+        )
+
+    register_match = bool(
+        matching_register_records,
+    )
+
+    if register_match:
+        score += 60
+    else:
+        score -= 20
 
     reasons = [
         (
@@ -292,7 +364,47 @@ def analyze_page_multi_pass(
             else "Personnumrets kontrollsiffra ar inte giltig"
         ),
     ]
+    if register_by_personnummer is None:
+        reasons.append(
+            "Inget register användes vid analysen"
+        )
 
+    elif not register_match:
+        reasons.append(
+            "Personnumret hittades inte i registret: "
+            "-20 poäng"
+        )
+
+    else:
+        reasons.append(
+            "Personnumret hittades i registret: "
+            "+60 poäng"
+        )
+
+        best_record, name_match = find_best_register_record(
+            matching_register_records,
+            combined_ocr_text,
+        )
+
+        if best_record is not None and name_match is not None:
+            score += name_match.points
+            reasons.extend(
+                name_match.reasons,
+            )
+
+            reasons.append(
+                "Vald registerpost: "
+                f"{best_record.fornamn} "
+                f"{best_record.efternamn}"
+            )
+
+    score = max(
+        0,
+        min(
+            100,
+            score,
+        ),
+    )
     alternatives = [
         (personnummer_candidate, votes)
         for personnummer_candidate, votes in candidate_votes.most_common()
