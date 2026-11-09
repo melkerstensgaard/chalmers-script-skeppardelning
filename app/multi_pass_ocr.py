@@ -14,17 +14,20 @@ PERSONNUMMER_PATTERNS = [
     re.compile(
         r"(?<!\d)"
         r"(\d{6})"
-        r"[-+ ]?"
+        r"\s*[-+]?\s*"
         r"(\d{4})"
         r"(?!\d)"
     ),
 
-    # YY-MM-DD-XXXX
+    # YY MM DD - XXXX
+    # Accepterar mellanslag, bindestreck, punkt och snedstreck
+    # mellan datumdelarna samt valfria mellanslag runt avskiljaren
+    # före de fyra sista siffrorna.
     re.compile(
         r"(?<!\d)"
-        r"(\d{2})[- /.]"
-        r"(\d{2})[- /.]"
-        r"(\d{2})[-+ /.]"
+        r"(\d{2})\s*[- /.]?\s*"
+        r"(\d{2})\s*[- /.]?\s*"
+        r"(\d{2})\s*[-+]?\s*"
         r"(\d{4})"
         r"(?!\d)"
     ),
@@ -33,19 +36,26 @@ PERSONNUMMER_PATTERNS = [
     re.compile(
         r"(?<!\d)"
         r"((?:18|19|20)\d{6})"
-        r"[-+ ]?"
+        r"\s*[-+]?\s*"
         r"(\d{4})"
         r"(?!\d)"
     ),
 
-    # YYYY-MM-DD-XXXX
+    # YYYY MM DD - XXXX
     re.compile(
         r"(?<!\d)"
-        r"((?:18|19|20)\d{2})[- /.]"
-        r"(\d{2})[- /.]"
-        r"(\d{2})[-+ /.]"
+        r"((?:18|19|20)\d{2})\s*[- /.]?\s*"
+        r"(\d{2})\s*[- /.]?\s*"
+        r"(\d{2})\s*[-+]?\s*"
         r"(\d{4})"
         r"(?!\d)"
+    ),
+
+    # Ofullständigt personnummer: endast YYMMDD.
+    re.compile(
+        r"(?<!\d)"
+        r"(\d{6})"
+        r"(?!\s*[-+]?\s*\d)"
     ),
 ]
 
@@ -91,6 +101,10 @@ def extract_personnummer_candidates(text):
         PERSONNUMMER_PATTERNS
     ):
         for match in pattern.finditer(text):
+            if pattern_index == 4:
+                candidates.add(match.group(1))
+                continue
+
             if pattern_index in (0, 2):
                 date_part = match.group(1)
                 suffix = match.group(2)
@@ -115,27 +129,23 @@ def extract_personnummer_candidates(text):
 
 def valid_luhn(personnummer: str) -> bool:
     digits = re.sub(r"\D", "", personnummer)
-
+    if len(digits) == 11:
+        # Norska födelsenummer använder modulus 11. Registerträffen
+        # används som validering för manuellt angivna norska nummer.
+        return True
     if len(digits) == 12:
         digits = digits[2:]
-
     if len(digits) != 10:
         return False
-
     total = 0
-
     for index, character in enumerate(digits):
         value = int(character)
-
         if index % 2 == 0:
             value *= 2
             if value > 9:
                 value -= 9
-
         total += value
-
     return total % 10 == 0
-
 
 def page_to_image(page, dpi: int = 300) -> Image.Image:
     scale = dpi / 72.0

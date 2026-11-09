@@ -25,43 +25,20 @@ class NameMatchResult:
 
 
 def normalize_personnummer(value) -> str:
-    """
-    Normaliserar kompletta personnummer till YYMMDD-XXXX.
-
-    Accepterar exempelvis:
-    6205055137
-    620505-5137
-    62-05-05-5137
-    196205055137
-    1962-05-05-5137
-    """
-
+    """Normaliserar svenska personnummer och norska födelsenummer."""
     if value is None:
         return ""
-
-    text = str(value).strip()
-
-    # Excel kan ge numeriska celler som float.
-    if isinstance(value, float) and value.is_integer():
-        text = str(int(value))
-
-    digits = re.sub(
-        r"\D",
-        "",
-        text,
-    )
-
-    # YYYYMMDDXXXX
+    text = str(int(value)) if isinstance(value, float) and value.is_integer() else str(value).strip()
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 6:
+        return digits
+    if len(digits) == 11:
+        return f"{digits[:6]}-{digits[6:]}"
     if len(digits) == 12:
         digits = digits[2:]
-
     if len(digits) != 10:
         return ""
-
-    return (
-        f"{digits[:6]}-"
-        f"{digits[6:]}"
-    )
+    return f"{digits[:6]}-{digits[6:]}"
 
 def normalize_name(value) -> str:
     """

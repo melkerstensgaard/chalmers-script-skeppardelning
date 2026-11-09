@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS pages(
  reviewed INTEGER DEFAULT 0,
  UNIQUE(source_pdf,page_number)
 );
-    
+
 CREATE TABLE IF NOT EXISTS session_state (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     current_page_id INTEGER,
@@ -27,10 +27,12 @@ CREATE TABLE IF NOT EXISTS session_state (
 );
 """
 
+
 class WorkDatabase:
     def __init__(self, path):
         self.path = Path(path)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn = sqlite3.connect(path, timeout=5.0)
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._migrate()
@@ -103,34 +105,63 @@ class WorkDatabase:
             score,
             score_reasons,
     ):
-        """
-        Sparar ett manuellt korrigerat personnummer och resultatet
-        från register- och namnkontrollen.
-        """
-
+        """Sparar personnummerkontroll utan att färdigmarkera sidan."""
         self.conn.execute(
             """
             UPDATE pages
-            SET personnummer        = ?,
+            SET personnummer = ?,
                 personnummer_source = 'människa',
-                score               = ?,
-                score_reasons       = ?,
-                reviewed            = 1
+                score = ?,
+                score_reasons = ?
             WHERE id = ?
             """,
-            (
-                personnummer,
-                score,
-                score_reasons,
-                page_id,
-            ),
+            (personnummer, score, score_reasons, page_id),
         )
+        self.conn.commit()
 
+    def update_automatic_personnummer_results(self, results):
+        """Sparar automatiska träffar utan att markera sidor som granskade.
+
+        results innehåller tuples:
+        (personnummer, score, score_reasons, page_id)
+        """
+        if not results:
+            return 0
+
+        cursor = self.conn.executemany(
+            """
+            UPDATE pages
+            SET personnummer = ?,
+                script_personnummer = ?,
+                personnummer_source = 'skript',
+                score = ?,
+                score_reasons = ?
+            WHERE id = ?
+              AND (personnummer IS NULL OR TRIM(personnummer) = '')
+            """,
+            [
+                (
+                    personnummer,
+                    personnummer,
+                    score,
+                    score_reasons,
+                    page_id,
+                )
+                for personnummer, score, score_reasons, page_id in results
+            ],
+        )
         self.conn.commit()
-    def close(self): self.conn.close()
+        return cursor.rowcount
+
+    def close(self):
+        self.conn.close()
+
     def set_root(self, root):
-        self.conn.execute("INSERT INTO project VALUES(1,?) ON CONFLICT(id) DO UPDATE SET source_root=excluded.source_root", (str(root),))
+        self.conn.execute(
+            "INSERT INTO project VALUES(1,?) ON CONFLICT(id) DO UPDATE SET source_root=excluded.source_root",
+            (str(root),))
         self.conn.commit()
+
     def root(self):
         row = self.conn.execute("SELECT source_root FROM project WHERE id=1").fetchone()
         return row[0] if row else ""
@@ -251,7 +282,22 @@ class WorkDatabase:
 
         self.conn.commit()
 
-
+    def restore_review_state(self, page_id, classification, personnummer,
+                             personnummer_source, reviewed, score,
+                             score_reasons):
+        """Återställer sidans granskningsvärden efter Ångra."""
+        self.conn.execute(
+            """
+            UPDATE pages
+            SET classification = ?, personnummer = ?,
+                personnummer_source = ?, reviewed = ?,
+                score = ?, score_reasons = ?
+            WHERE id = ?
+            """,
+            (classification, personnummer, personnummer_source,
+             reviewed, score, score_reasons, page_id),
+        )
+        self.conn.commit()
 
     def get_progress_statistics(self):
         """

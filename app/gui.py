@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import json
 import threading
+import re
 
 import fitz
 from PIL import Image, ImageTk
@@ -17,12 +18,12 @@ from .register_matcher import (
     find_best_register_record,
 )
 
-from .multi_pass_ocr import valid_luhn
+from .multi_pass_ocr import valid_luhn, extract_personnummer_candidates
 
 class ReviewApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Sjöfartsbevisbearbetare v0.5")
+        self.root.title("Sjöfartsbevisbearbetare v0.6")
         self.root.geometry("1600x950")
         self.root.minsize(1200, 720)
 
@@ -96,6 +97,7 @@ class ReviewApp:
 
         self.image_origin = (0, 0)
         self.buttons = {}
+        self.undo_stack = []
 
         self.build()
         self.bind_keys()
@@ -143,6 +145,10 @@ class ReviewApp:
             (
                 "Läs in seriemapp",
                 self.load_folder
+            ),
+            (
+                "Sök i befintlig OCR",
+                self.rescan_existing_ocr_without_personnummer
             ),
             (
                 "Exportera resultat",
@@ -785,10 +791,8 @@ class ReviewApp:
             weight=1
         )
 
-        navigation.columnconfigure(
-            1,
-            weight=1
-        )
+        navigation.columnconfigure(1, weight=1)
+        navigation.columnconfigure(2, weight=1)
 
         ttk.Button(
             navigation,
@@ -803,14 +807,15 @@ class ReviewApp:
 
         ttk.Button(
             navigation,
+            text="Ångra senaste klassificering",
+            command=self.undo_last_classification
+        ).grid(row=0, column=1, sticky="ew", padx=2)
+
+        ttk.Button(
+            navigation,
             text="Nästa →",
             command=lambda: self.move(1)
-        ).grid(
-            row=0,
-            column=1,
-            sticky="ew",
-            padx=(2, 0)
-        )
+        ).grid(row=0, column=2, sticky="ew", padx=(2, 0))
 
         # -------------------------------------------------
         # Statusrad
@@ -847,8 +852,54 @@ class ReviewApp:
 
         self.root.bind(
             "<Control-s>",
-            lambda event: self.save()
+            self.save_shortcut
         )
+        self.root.bind("<Control-z>", lambda event: self.undo_last_classification())
+        # Tk rapporterar numeriska tangentbordet som KP_0 ... KP_9.
+        for digit in range(10):
+            self.pnr_entry.bind(
+                f"<KP_{digit}>",
+                lambda event, d=str(digit): self._insert_numpad_text(d),
+            )
+        for keysym in ("KP_Subtract", "KP_Decimal"):
+            self.pnr_entry.bind(
+                f"<{keysym}>",
+                lambda event: self._insert_numpad_text("-"),
+            )
+
+    def _insert_numpad_text(self, text):
+        """Infogar tecken från numeriska tangentbordet i personnummerfältet."""
+        self.pnr_entry.insert(tk.INSERT, text)
+        return "break"
+
+    def save_shortcut(self, event=None):
+        """Sparar aktuell sida men behåller den synlig."""
+        if not self.db or not self.rows:
+            return "break"
+
+        current_page_id = self.rows[self.index]["id"]
+        self.db.save(
+            current_page_id,
+            self.class_var.get(),
+            self.pnr_var.get(),
+        )
+        self.db.save_current_position(current_page_id)
+
+        self.all_rows = list(self.db.pages())
+        updated_row = next(
+            (
+                row
+                for row in self.all_rows
+                if row["id"] == current_page_id
+            ),
+            None,
+        )
+        if updated_row is not None:
+            self.rows[self.index] = updated_row
+            self.show()
+
+        self.status.set("Ändringarna har sparats.")
+        return "break"
 
     def block_ocr_edit(self, event):
         """
@@ -1187,109 +1238,54 @@ class ReviewApp:
             preserve_page_id=preserve_page_id
         )
 
-    def apply_view_filter(
-            self,
-            preserve_page_id=None,
-    ):
+    def apply_view_filter(self, preserve_page_id=None):
+        """Återskapar den aktiva vyn. Klassificerade sidor visas bara
+        i den uttryckliga vyn ``granskade``.
         """
-        Skapar self.rows utifrån aktuellt visningsläge.
-
-        Lägen:
-        alla:
-            Visar samtliga sidor.
-
-        osakra:
-            Visar sidor med poäng under 100.
-
-        utan_personnummer:
-            Visar sidor där inget personnummer finns.
-        """
-
-        if self.view_mode == "osakra":
-            self.rows = [
-                row
-                for row in self.all_rows
-                if (
-                        0 < float(row["score"] or 0) < 100
-                        and (
-                                row["personnummer_source"] or ""
-                        ).strip().casefold() != "människa"
-                )
-            ]
-
-
-            self.view_status.set(
-                f"Visning: Osäkra sidor "
-                f"({len(self.rows)})"
-            )
-
-        elif self.view_mode == "utan_personnummer":
-            self.rows = [
-                row
-                for row in self.all_rows
-                if not str(
-                    row["personnummer"] or ""
-                ).strip()
-            ]
-
-            self.view_status.set(
-                f"Visning: Sidor utan personnummer "
-                f"({len(self.rows)})"
-            )
-
-        else:
-            self.view_mode = "alla"
-            self.rows = list(
-                self.all_rows
-            )
-
-            self.view_status.set(
-                f"Visning: Alla sidor "
-                f"({len(self.rows)})"
-            )
-
+        self.rows = self._rows_for_current_view()
+        self._update_view_status()
         if not self.rows:
             self.index = 0
-
-            self.title_var.set(
-                "Inga sidor motsvarar det valda filtret"
-            )
-
-            self.class_var.set("")
-            self.pnr_var.set("")
-
-            self.score_label.config(
-                text="Poäng: –"
-            )
-
-            self.reasons.delete(
-                0,
-                "end"
-            )
-
-            self.ocr.delete(
-                "1.0",
-                "end"
-            )
-
-            self.canvas.delete(
-                "all"
-            )
-
-            self.clear_progress()
+            self._clear_page_view("Inga sidor motsvarar det valda filtret")
             return
-
         self.index = 0
-
         if preserve_page_id is not None:
-            for row_index, row in enumerate(
-                    self.rows
-            ):
+            for row_index, row in enumerate(self.rows):
                 if row["id"] == preserve_page_id:
                     self.index = row_index
                     break
-
         self.show()
+
+    def _rows_for_current_view(self):
+        unreviewed = [r for r in self.all_rows if not int(r["reviewed"] or 0)]
+        if self.view_mode == "osakra":
+            return [r for r in unreviewed if 0 < float(r["score"] or 0) < 100
+                    and (r["personnummer_source"] or "").strip().casefold() != "människa"]
+        if self.view_mode == "utan_personnummer":
+            return [r for r in unreviewed if not str(r["personnummer"] or "").strip()]
+        if self.view_mode == "granskade":
+            return [r for r in self.all_rows if int(r["reviewed"] or 0) == 1]
+        self.view_mode = "alla"
+        return unreviewed
+
+    def _update_view_status(self):
+        labels = {
+            "alla": "Ogranskade sidor",
+            "osakra": "Osäkra ogranskade sidor",
+            "utan_personnummer": "Ogranskade sidor utan personnummer",
+            "granskade": "Redan klassificerade sidor",
+        }
+        self.view_status.set(f"Visning: {labels[self.view_mode]} ({len(self.rows)})")
+
+    def _clear_page_view(self, title):
+        self.title_var.set(title)
+        self.class_var.set("")
+        self.pnr_var.set("")
+        self.score_label.config(text="Poäng: –")
+        self.reasons.delete(0, "end")
+        self.ocr.delete("1.0", "end")
+        self.canvas.delete("all")
+        self.clear_progress()
     def show(self):
         if not self.rows:
             self.title_var.set(
@@ -1757,6 +1753,132 @@ class ReviewApp:
                     ["!pressed"]
                 )
 
+    def rescan_existing_ocr_without_personnummer(self):
+        """Söker nya format i sparad OCR-text utan att köra OCR igen."""
+        if not self.db:
+            messagebox.showwarning(
+                "Ingen arbetsdatabas",
+                "Öppna en arbetsdatabas först.",
+            )
+            return
+
+        missing_rows = [
+            row
+            for row in self.db.pages()
+            if not str(row["personnummer"] or "").strip()
+        ]
+
+        if not missing_rows:
+            messagebox.showinfo(
+                "Omsökning klar",
+                "Det finns inga sidor utan personnummer.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Sök i befintlig OCR",
+            (
+                f"{len(missing_rows)} sidor saknar personnummer.\n\n"
+                "Sök igenom deras redan sparade OCR-text med de nya "
+                "personnummerformaten? Ingen ny OCR-analys körs."
+            ),
+        ):
+            return
+
+        updates = []
+        ambiguous = 0
+
+        for row in missing_rows:
+            candidates = extract_personnummer_candidates(
+                str(row["ocr_text"] or "")
+            )
+            if not candidates:
+                continue
+
+            def candidate_key(value):
+                in_register = bool(
+                    self.register_by_personnummer
+                    and value in self.register_by_personnummer
+                )
+                return (
+                    in_register,
+                    valid_luhn(value),
+                    len(re.sub(r"\D", "", value)),
+                )
+
+            ranked = sorted(
+                candidates,
+                key=lambda value: (candidate_key(value), value),
+                reverse=True,
+            )
+            selected = ranked[0]
+            best_key = candidate_key(selected)
+            equally_ranked = [
+                value
+                for value in ranked
+                if candidate_key(value) == best_key
+            ]
+
+            # Skriv inte automatiskt när flera kandidater är lika starka.
+            if len(equally_ranked) > 1:
+                ambiguous += 1
+                continue
+
+            reasons = [
+                "Personnummer hittat vid omsökning av befintlig OCR-text",
+                f"Kandidat: {selected}",
+            ]
+            score = int(row["score"] or 0)
+
+            if (
+                self.register_by_personnummer
+                and selected in self.register_by_personnummer
+            ):
+                score = max(score, 60)
+                reasons.append("Personnumret finns i registret")
+            elif valid_luhn(selected):
+                score = max(score, 40)
+                reasons.append(
+                    "Personnumret har giltig svensk kontrollsiffra"
+                )
+            else:
+                score = max(score, 10)
+                reasons.append(
+                    "Ofullständigt eller icke-Luhn-validerat format"
+                )
+
+            updates.append(
+                (
+                    selected,
+                    score,
+                    json.dumps(reasons, ensure_ascii=False),
+                    row["id"],
+                )
+            )
+
+        updated_count = self.db.update_automatic_personnummer_results(
+            updates
+        )
+        self.refresh()
+
+        remaining = sum(
+            1
+            for row in self.all_rows
+            if not str(row["personnummer"] or "").strip()
+        )
+        self.status.set(
+            f"Omsökning klar: {updated_count} nya personnummer hittades."
+        )
+        messagebox.showinfo(
+            "Omsökning klar",
+            (
+                f"Kontrollerade OCR-resultat: {len(missing_rows)}\n"
+                f"Nya personnummer: {updated_count}\n"
+                f"Tvetydiga resultat, inte ändrade: {ambiguous}\n"
+                f"Återstår utan personnummer: {remaining}"
+            ),
+        )
+
     def search_corrected_personnummer(self):
         """
         Söker efter det personnummer som användaren har skrivit
@@ -1803,7 +1925,8 @@ class ReviewApp:
                 (
                     "Det inskrivna värdet kunde inte tolkas som ett "
                     "personnummer.\n\n"
-                    "Använd exempelvis formatet 620505-5137."
+                    "Använd exempelvis 620505-5137 eller 620505 "
+                    "om de fyra slutsiffrorna saknas."
                 )
             )
             return
@@ -1829,23 +1952,36 @@ class ReviewApp:
             )
         ]
 
-        # Kontrollera svensk kontrollsiffra.
-        checksum_valid = valid_luhn(
-            normalized_personnummer
+        personnummer_digits = re.sub(
+            r"\D", "", normalized_personnummer
         )
 
-        if checksum_valid:
-            score += 10
-
+        if len(personnummer_digits) == 6:
+            checksum_valid = False
             reasons.append(
-                "Personnumrets har rätt format och är giltig: +10 poäng"
+                "Sexsiffrigt personnummer utan slutsiffror. "
+                "Kontrollsiffra kan inte valideras."
+            )
+        elif len(personnummer_digits) == 11:
+            checksum_valid = False
+            reasons.append(
+                "Norskt födelsenummer. Svensk Luhn-kontroll används inte."
             )
         else:
-            score -= 10
-
-            reasons.append(
-                "Personnumrets har fel format: -10 poäng"
+            checksum_valid = valid_luhn(
+                normalized_personnummer
             )
+
+            if checksum_valid:
+                score += 10
+                reasons.append(
+                    "Personnumret har giltig svensk kontrollsiffra: +10 poäng"
+                )
+            else:
+                score -= 10
+                reasons.append(
+                    "Personnumret har felaktig svensk kontrollsiffra: -10 poäng"
+                )
 
         matching_records = self.register_by_personnummer.get(
             normalized_personnummer,
@@ -1960,107 +2096,26 @@ class ReviewApp:
             )
         )
 
-    def save_corrected_validation_result(
-            self,
-            personnummer,
-            score,
-            reasons,
-    ):
-        """
-        Sparar resultatet från kontrollen av ett manuellt
-        korrigerat personnummer.
-        """
-
+    def save_corrected_validation_result(self, personnummer, score, reasons):
+        """Sparar registerkontrollen utan att automatiskt byta sida."""
         if not self.rows:
             return
-
-        current_page_id = self.rows[
-            self.index
-        ]["id"]
-
-        score_reasons_json = json.dumps(
-            reasons,
-            ensure_ascii=False,
-        )
-
+        current_page_id = self.rows[self.index]["id"]
         self.db.update_validation_result(
             page_id=current_page_id,
             personnummer=personnummer,
             score=score,
-            score_reasons=score_reasons_json,
+            score_reasons=json.dumps(reasons, ensure_ascii=False),
         )
+        self.db.save_current_position(current_page_id)
+        self.all_rows = list(self.db.pages())
+        updated = next(r for r in self.all_rows if r["id"] == current_page_id)
+        # Behåll sidan i den aktuella listan tills användaren klassificerar
+        # eller navigerar. Det förhindrar att sökknappen hoppar vidare.
+        self.rows[self.index] = updated
+        self.show()
+        self.status.set(f"Personnummer {personnummer} kontrollerades mot registret.")
 
-        self.db.save_current_position(
-            current_page_id
-        )
-
-        # Hämta den uppdaterade databasen.
-        self.all_rows = list(
-            self.db.pages()
-        )
-
-        # Återskapa aktuellt filter utan att byta sida i onödan.
-        self.apply_view_filter_without_show(
-            preserve_page_id=current_page_id
-        )
-
-        if self.rows:
-            matching_index = None
-
-            for row_index, row in enumerate(
-                    self.rows
-            ):
-                if row["id"] == current_page_id:
-                    matching_index = row_index
-                    break
-
-            if matching_index is not None:
-                self.index = matching_index
-                self.show()
-            else:
-                # Sidan kan ha försvunnit ur filtret
-                # "Sidor utan personnummer".
-                self.index = min(
-                    self.index,
-                    len(self.rows) - 1
-                )
-
-                self.show()
-
-        else:
-            self.title_var.set(
-                "Inga sidor motsvarar det valda filtret"
-            )
-
-            self.class_var.set("")
-            self.pnr_var.set("")
-
-            self.score_label.config(
-                text="Poäng: –"
-            )
-
-            self.reasons.delete(
-                0,
-                "end"
-            )
-
-            self.ocr.delete(
-                "1.0",
-                "end"
-            )
-
-            self.canvas.delete(
-                "all"
-            )
-
-            self.clear_progress()
-
-        self.status.set(
-            (
-                f"Personnummer {personnummer} kontrollerades "
-                f"mot registret."
-            )
-        )
     def save(self):
         if not self.db:
             return
@@ -2145,134 +2200,64 @@ class ReviewApp:
             "Ändringarna har sparats."
         )
 
-    def apply_view_filter_without_show(
-            self,
-            preserve_page_id=None,
-    ):
-        """
-        Samma filtrering som apply_view_filter, men utan
-        att återge PDF-sidan på nytt.
-
-        Används efter sparning så att gränssnittet inte
-        blinkar eller återrenderar PDF-filen i onödan.
-        """
-
-        if self.view_mode == "osakra":
-            self.rows = [
-                row
-                for row in self.all_rows
-                if (
-                        0 < float(row["score"] or 0) < 100
-                        and (
-                                row["personnummer_source"] or ""
-                        ).strip().casefold() != "människa"
-                )
-            ]
-
-            self.view_status.set(
-                f"Visning: Osäkra sidor "
-                f"({len(self.rows)})"
-            )
-
-        elif self.view_mode == "utan_personnummer":
-            self.rows = [
-                row
-                for row in self.all_rows
-                if not str(
-                    row["personnummer"] or ""
-                ).strip()
-            ]
-
-            self.view_status.set(
-                f"Visning: Sidor utan personnummer "
-                f"({len(self.rows)})"
-            )
-
-
-        else:
-
-            self.view_mode = "alla"
-
-            self.rows = list(
-
-                self.all_rows
-
-            )
-
-            self.view_status.set(
-
-                f"Visning: Alla sidor "
-
-                f"({len(self.rows)})"
-
-            )
-
+    def apply_view_filter_without_show(self, preserve_page_id=None):
+        self.rows = self._rows_for_current_view()
+        self._update_view_status()
         if not self.rows:
             self.index = 0
             return
-
-        self.index = min(
-            self.index,
-            len(self.rows) - 1
-        )
-
+        self.index = min(self.index, len(self.rows) - 1)
         if preserve_page_id is not None:
-            for row_index, row in enumerate(
-                    self.rows
-            ):
+            for row_index, row in enumerate(self.rows):
                 if row["id"] == preserve_page_id:
                     self.index = row_index
                     break
-
     def set_class(self, value):
         if not self.rows:
             return
-
-        current_page_id = self.rows[
-            self.index
-        ]["id"]
-
-        self.class_var.set(
-            value
-        )
-
+        row = self.rows[self.index]
+        self.undo_stack.append({
+            "page_id": row["id"],
+            "classification": row["classification"],
+            "personnummer": row["personnummer"],
+            "personnummer_source": row["personnummer_source"],
+            "reviewed": row["reviewed"],
+            "score": row["score"],
+            "score_reasons": row["score_reasons"],
+            "view_mode": self.view_mode,
+        })
+        self.class_var.set(value)
         self.update_class_buttons()
         self.save()
+        if self.rows:
+            self.show()
 
-        if not self.rows:
+    def undo_last_classification(self):
+        if not self.db or not self.undo_stack:
+            self.status.set("Det finns ingen klassificering att ångra.")
             return
-
-        current_page_still_visible = any(
-            row["id"] == current_page_id
-            for row in self.rows
+        state = self.undo_stack.pop()
+        self.db.restore_review_state(
+            state["page_id"], state["classification"], state["personnummer"],
+            state["personnummer_source"], state["reviewed"], state["score"],
+            state["score_reasons"],
         )
-
-        if current_page_still_visible:
-            self.move(
-                1,
-                save=False
-            )
-
-
-    def move(
-        self,
-        amount,
-        save=True
-    ):
+        self.all_rows = list(self.db.pages())
+        self.view_mode = state["view_mode"]
+        self.apply_view_filter(preserve_page_id=state["page_id"])
+        self.status.set("Den senaste klassificeringen har ångrats.")
+    def move(self, amount, save=False):
+        """Navigerar utan att spara eller ändra granskningsstatus."""
         if not self.rows:
             return
-
-        if save:
-            self.save()
 
         self.index = max(
             0,
             min(
                 len(self.rows) - 1,
-                self.index + amount
-            )
+                self.index + amount,
+            ),
         )
-
         self.show()
 
     def fit_page(self):
@@ -2570,7 +2555,7 @@ class ReviewApp:
             pady=(10, 5),
         )
 
-        for column in range(3):
+        for column in range(4):
             filters_frame.columnconfigure(
                 column,
                 weight=1,
@@ -2578,7 +2563,7 @@ class ReviewApp:
 
         ttk.Button(
             filters_frame,
-            text="Visa alla sidor",
+            text="Visa ogranskade sidor",
             command=lambda: self.activate_view_mode(
                 "alla",
                 dialog,
@@ -2617,6 +2602,11 @@ class ReviewApp:
             sticky="ew",
             padx=(4, 0),
         )
+        ttk.Button(
+            filters_frame,
+            text="Visa redan klassificerade",
+            command=lambda: self.activate_view_mode("granskade", dialog),
+        ).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         # -------------------------------------------------
         # Volymval
@@ -2915,8 +2905,7 @@ class ReviewApp:
 
         else:
             self.status.set(
-                f"Visar samtliga "
-                f"{len(self.rows)} sidor."
+                f"Visar {len(self.rows)} ogranskade sidor."
             )
     def do_export(self):
         if not self.db:

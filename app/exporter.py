@@ -11,8 +11,12 @@ def safe(value):
 
 def export_project(db, output):
     output=Path(output); output.mkdir(parents=True,exist_ok=True)
-    groups=[]; current=None
+    groups=[]; current=None; previous_relative_pdf=None
     for row in db.pages():
+        relative_pdf=row["relative_pdf"]
+        if relative_pdf != previous_relative_pdf:
+            current=None
+            previous_relative_pdf=relative_pdf
         classification=row["classification"] or "ogranskad"
         if classification=="nytt_bevis":
             current={"type":"bevis","rows":[row]}; groups.append(current)
